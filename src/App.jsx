@@ -681,7 +681,7 @@ const ExerciseRow = ({
         <div className="pointer-events-none absolute top-12 bottom-8 right-0 w-6" style={{ background: 'linear-gradient(to left, #000 0%, transparent 100%)' }} />
       )}
       {/* Header row */}
-      <div className="flex items-start justify-between mb-1 px-1 gap-2">
+      <div className="flex items-start justify-between mb-1 pl-1 pr-3 gap-2">
         <div className="flex-1 min-w-0">
           {editingName ? (
             <div className="flex gap-2">
@@ -2299,11 +2299,23 @@ export default function App() {
     }
   }, [session, loading, editingExistingId]);
 
-  // Build a map of exercise name -> most recent previous session stats for that exercise
+  // Build a map of exercise name -> most recent previous SAME-PROGRAMME session stats for that exercise.
   // Only considers "included" exercises, ignores warmup data in averages.
+  // Filtering by matching programme ensures anterior days compare against anterior days,
+  // posterior against posterior, never mixing them.
   const previousByExercise = useMemo(() => {
     const map = {};
-    const pool = sessions.filter((s) => s.id !== session?.id);
+    const currentProgramme = session?.programme;
+    // Filter to same-programme sessions, exclude the currently-loaded one, sort newest first
+    const pool = sessions
+      .filter((s) => s.id !== session?.id)
+      .filter((s) => !currentProgramme || s.programme === currentProgramme)
+      .sort((a, b) => {
+        const dA = new Date(a.date).getTime();
+        const dB = new Date(b.date).getTime();
+        if (dB !== dA) return dB - dA; // newer first
+        return (b.id || 0) - (a.id || 0); // tie-break by id
+      });
     for (const s of pool) {
       for (const ex of s.exercises || []) {
         if (map[ex.name]) continue;
@@ -2334,7 +2346,7 @@ export default function App() {
       }
     }
     return map;
-  }, [sessions, session?.id]);
+  }, [sessions, session?.id, session?.programme]);
 
   const updateSession = (patch) => setSession((s) => ({ ...s, ...patch }));
 
