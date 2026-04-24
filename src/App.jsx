@@ -108,6 +108,20 @@ const storage = {
   async deleteSession(id) {
     try { await window.storage.delete(`session:${id}`); } catch (e) { console.error(e); }
   },
+  // One-time migration: clears stored programme templates so the current
+  // PROGRAMMES defaults take effect. Bumped to 3 after the ANT/POS revert.
+  async runSwapMigration() {
+    try {
+      const r = await window.storage.get('schema-version');
+      const version = r ? Number(r.value) : 0;
+      if (version < 3) {
+        await window.storage.delete('template:anterior');
+        await window.storage.delete('template:posterior');
+        await window.storage.delete('template'); // legacy pre-programme key
+        await window.storage.set('schema-version', '3');
+      }
+    } catch (e) { console.error('Migration error:', e); }
+  },
 };
 
 // ============================================================
@@ -2258,6 +2272,8 @@ export default function App() {
   // Load initial data
   useEffect(() => {
     (async () => {
+      // Run one-time migration to clear stale stored templates from the ANT/POS swap
+      await storage.runSwapMigration();
       const all = await storage.listSessions();
       setSessions(all);
       const draft = await storage.getDraft();
