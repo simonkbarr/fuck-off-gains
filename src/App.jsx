@@ -250,7 +250,7 @@ const weekKey = (dateStr) => {
 // ============================================================
 // Bottom Sheet - Set Editor
 // ============================================================
-const SetEditor = ({ exercise, setIndex, onChange, onClose, isWarmup = false, suggested = null }) => {
+const SetEditor = ({ exercise, setIndex, onChange, onClose, onDeleteSet, isWarmup = false, suggested = null }) => {
   const setsArr = isWarmup ? (exercise.warmupSets || []) : exercise.sets;
   const set = setsArr[setIndex];
   const isBW = exercise.unit === 'bw';
@@ -443,9 +443,23 @@ const SetEditor = ({ exercise, setIndex, onChange, onClose, isWarmup = false, su
           </button>
         </div>
 
-        <button onClick={onClose} className="w-full h-14 bg-white text-black font-bold tracking-widest rounded-lg" style={{ fontFamily: 'var(--font-display)' }}>
-          DONE
-        </button>
+        <div className="flex gap-2">
+          {onDeleteSet && (
+            <button
+              onClick={() => {
+                if (typeof window !== 'undefined' && !window.confirm('Delete this set? This cannot be undone.')) return;
+                onDeleteSet();
+              }}
+              className="h-14 w-14 bg-red-950/40 border-2 border-red-800 text-red-400 rounded-lg flex items-center justify-center active:bg-red-900/50"
+              aria-label="Delete this set"
+            >
+              <Trash2 className="w-5 h-5" />
+            </button>
+          )}
+          <button onClick={onClose} className="flex-1 h-14 bg-white text-black font-bold tracking-widest rounded-lg" style={{ fontFamily: 'var(--font-display)' }}>
+            DONE
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -646,7 +660,11 @@ const ExerciseRow = ({
   const warmupSets = exercise.warmupSets || [];
 
   return (
-    <div className={`border-b border-neutral-900 py-3 ${!included ? 'opacity-40' : ''}`}>
+    <div className={`relative border-b border-neutral-900 py-3 ${!included ? 'opacity-40' : ''}`}>
+      {/* Right-edge fade hint to suggest horizontal scroll on wider set rows */}
+      {included && exercise.sets && exercise.sets.length > 3 && (
+        <div className="pointer-events-none absolute top-12 bottom-8 right-0 w-6" style={{ background: 'linear-gradient(to left, #000 0%, transparent 100%)' }} />
+      )}
       {/* Header row */}
       <div className="flex items-start justify-between mb-1 px-1 gap-2">
         <div className="flex-1 min-w-0">
@@ -710,25 +728,27 @@ const ExerciseRow = ({
       {showPrevDetail && prev?.setData && (
         <div className="px-1 mb-3 pb-2 border-b border-neutral-900">
           <div className="text-[9px] tracking-widest text-neutral-600 mb-1" style={{ fontFamily: 'var(--font-display)' }}>PREVIOUS SESSION PER-SET</div>
-          <div className="flex gap-1.5 overflow-x-auto scrollbar-none" style={{ scrollbarWidth: 'none' }}>
-            {prev.setData.map((ps, i) => {
-              const isBW = exercise.unit === 'bw' || ps.bw;
-              const hasTime = ps.time !== '' && parseFloat(ps.time) > 0;
-              const hasReps = ps.reps !== '' && parseInt(ps.reps) > 0;
-              const hero = hasTime ? `${ps.time}s` : (hasReps ? `${ps.reps}r` : '-');
-              const bits = [];
-              if (hasTime && hasReps) bits.push(`${ps.reps}r`);
-              if (ps.failure) bits.push('FAIL');
-              else if (isBW) bits.push('BW');
-              else if (ps.weight !== '' && ps.weight !== 0) bits.push(`${ps.weight}kg`);
-              return (
-                <div key={i} className="shrink-0 w-[72px] bg-neutral-950 border border-neutral-800 rounded p-1.5 text-center">
-                  <div className="text-[8px] tracking-widest text-neutral-600" style={{ fontFamily: 'var(--font-display)' }}>SET {i + 1}</div>
-                  <div className="font-mono text-sm text-neutral-300 font-bold mt-0.5">{hero}</div>
-                  <div className="font-mono text-[9px] text-neutral-500 mt-0.5 truncate">{bits.join(' · ') || '—'}</div>
-                </div>
-              );
-            })}
+          <div className="overflow-x-auto scrollbar-none" style={{ scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' }}>
+            <div className="flex gap-1.5 w-max">
+              {prev.setData.map((ps, i) => {
+                const isBW = exercise.unit === 'bw' || ps.bw;
+                const hasTime = ps.time !== '' && parseFloat(ps.time) > 0;
+                const hasReps = ps.reps !== '' && parseInt(ps.reps) > 0;
+                const hero = hasTime ? `${ps.time}s` : (hasReps ? `${ps.reps}r` : '-');
+                const bits = [];
+                if (hasTime && hasReps) bits.push(`${ps.reps}r`);
+                if (ps.failure) bits.push('FAIL');
+                else if (isBW) bits.push('BW');
+                else if (ps.weight !== '' && ps.weight !== 0) bits.push(`${ps.weight}kg`);
+                return (
+                  <div key={i} className="shrink-0 w-[72px] bg-neutral-950 border border-neutral-800 rounded p-1.5 text-center">
+                    <div className="text-[8px] tracking-widest text-neutral-600" style={{ fontFamily: 'var(--font-display)' }}>SET {i + 1}</div>
+                    <div className="font-mono text-sm text-neutral-300 font-bold mt-0.5">{hero}</div>
+                    <div className="font-mono text-[9px] text-neutral-500 mt-0.5 truncate">{bits.join(' · ') || '—'}</div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       )}
@@ -741,55 +761,59 @@ const ExerciseRow = ({
             <span className="text-[9px] tracking-widest text-amber-500 font-semibold" style={{ fontFamily: 'var(--font-display)' }}>WARM-UP</span>
             <span className="text-[9px] text-neutral-600 font-mono">(not counted in averages)</span>
           </div>
-          <div className="flex gap-2 overflow-x-auto pb-1 px-1 scrollbar-none" style={{ scrollbarWidth: 'none' }}>
-            {warmupSets.map((set, i) => (
-              <SetCell
-                key={`w-${i}`}
-                set={set}
-                index={i}
-                unit={exercise.unit}
-                onClick={() => onEditWarmup(i)}
-                isWarmup
-              />
-            ))}
-            <div className="flex flex-col gap-1 shrink-0 justify-center">
-              <button onClick={onAddWarmup} className="w-8 h-8 bg-amber-950/40 border border-amber-800/60 rounded flex items-center justify-center active:bg-amber-950">
-                <Plus className="w-4 h-4 text-amber-500" />
-              </button>
-              {warmupSets.length > 0 && (
-                <button onClick={onRemoveWarmup} className="w-8 h-8 bg-amber-950/40 border border-amber-800/60 rounded flex items-center justify-center active:bg-amber-950">
-                  <Minus className="w-4 h-4 text-amber-500" />
+          <div className="overflow-x-auto scrollbar-none -mx-1 px-1" style={{ scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' }}>
+            <div className="flex gap-2 pb-1 w-max">
+              {warmupSets.map((set, i) => (
+                <SetCell
+                  key={`w-${i}`}
+                  set={set}
+                  index={i}
+                  unit={exercise.unit}
+                  onClick={() => onEditWarmup(i)}
+                  isWarmup
+                />
+              ))}
+              <div className="flex flex-col gap-1 shrink-0 justify-center">
+                <button onClick={onAddWarmup} className="w-8 h-8 bg-amber-950/40 border border-amber-800/60 rounded flex items-center justify-center active:bg-amber-950">
+                  <Plus className="w-4 h-4 text-amber-500" />
                 </button>
-              )}
+                {warmupSets.length > 0 && (
+                  <button onClick={onRemoveWarmup} className="w-8 h-8 bg-amber-950/40 border border-amber-800/60 rounded flex items-center justify-center active:bg-amber-950">
+                    <Minus className="w-4 h-4 text-amber-500" />
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
       )}
 
       {/* Working sets row */}
-      <div className="flex gap-2 overflow-x-auto pb-1 px-1 scrollbar-none" style={{ scrollbarWidth: 'none' }}>
-        {exercise.sets.map((set, i) => (
-          <SetCell
-            key={i}
-            set={set}
-            index={i}
-            unit={exercise.unit}
-            onClick={() => onEditSet(i)}
-            prevSet={prev?.setData?.[i]}
-            suggested={getSuggested(i)}
-          />
-        ))}
-        <div className="flex flex-col gap-1 shrink-0 justify-center">
-          <button onClick={onAddSet} className="w-8 h-8 bg-neutral-900 border border-neutral-800 rounded flex items-center justify-center active:bg-neutral-800">
-            <Plus className="w-4 h-4 text-neutral-400" />
-          </button>
-          {exercise.sets.length > 1 && (
-            <button onClick={onRemoveSet} className="w-8 h-8 bg-neutral-900 border border-neutral-800 rounded flex items-center justify-center active:bg-neutral-800">
-              <Minus className="w-4 h-4 text-neutral-400" />
+      <div className="overflow-x-auto scrollbar-none -mx-1 px-1" style={{ scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' }}>
+        <div className="flex gap-2 pb-1 w-max">
+          {exercise.sets.map((set, i) => (
+            <SetCell
+              key={i}
+              set={set}
+              index={i}
+              unit={exercise.unit}
+              onClick={() => onEditSet(i)}
+              prevSet={prev?.setData?.[i]}
+              suggested={getSuggested(i)}
+            />
+          ))}
+          <div className="flex flex-col gap-1 shrink-0 justify-center">
+            <button onClick={onAddSet} className="w-8 h-8 bg-neutral-900 border border-neutral-800 rounded flex items-center justify-center active:bg-neutral-800">
+              <Plus className="w-4 h-4 text-neutral-400" />
             </button>
-          )}
+            {exercise.sets.length > 1 && (
+              <button onClick={onRemoveSet} className="w-8 h-8 bg-neutral-900 border border-neutral-800 rounded flex items-center justify-center active:bg-neutral-800">
+                <Minus className="w-4 h-4 text-neutral-400" />
+              </button>
+            )}
+          </div>
+          <AverageCell exercise={exercise} prev={prev} />
         </div>
-        <AverageCell exercise={exercise} prev={prev} />
       </div>
     </div>
   );
@@ -2208,6 +2232,7 @@ export default function App() {
   const [showConfetti, setShowConfetti] = useState(false);
   const [showSaveConfirm, setShowSaveConfirm] = useState(false);
   const [summaryData, setSummaryData] = useState(null); // { justSaved, previousSameProgramme } when summary should show
+  const [editingExistingId, setEditingExistingId] = useState(null); // set when loading a past session to edit
 
   // Helper: build an "included" flags map from most recent session of same programme
   const buildIncludedMap = (sessionsList, programme) => {
@@ -2249,13 +2274,13 @@ export default function App() {
     })();
   }, []);
 
-  // Auto-save draft
+  // Auto-save draft (skip when editing a past session so we don't overwrite the live draft)
   useEffect(() => {
-    if (session && !loading) {
+    if (session && !loading && !editingExistingId) {
       const t = setTimeout(() => storage.setDraft(session), 400);
       return () => clearTimeout(t);
     }
-  }, [session, loading]);
+  }, [session, loading, editingExistingId]);
 
   // Build a map of exercise name -> most recent previous session stats for that exercise
   // Only considers "included" exercises, ignores warmup data in averages.
@@ -2349,9 +2374,29 @@ export default function App() {
     if (!toSave.id) toSave.id = `s_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     if (!toSave.date) toSave.date = new Date().toISOString();
     await storage.saveSession(toSave);
-    await storage.clearDraft();
     const all = await storage.listSessions();
     setSessions(all);
+
+    // EDIT MODE: overwrite the existing session and return to history without celebration
+    if (editingExistingId) {
+      setEditingExistingId(null);
+      // Restore the live draft so the next new session isn't blank
+      const draft = await storage.getDraft();
+      if (draft) {
+        if (!draft.programme) draft.programme = 'anterior';
+        setSession(draft);
+      } else {
+        const next = await buildSessionForProgramme(toSave.programme || 'anterior', all);
+        setSession(next);
+      }
+      setSavedFlash(true);
+      setTimeout(() => setSavedFlash(false), 2000);
+      setView('history');
+      return;
+    }
+
+    // NEW SESSION: normal save flow with confetti, summary, next-session load
+    await storage.clearDraft();
     // Save template from current exercise list, per-programme
     const template = toSave.exercises.map((e) => ({
       name: e.name, unit: e.unit, sets: e.sets.length, superset: e.superset,
@@ -2374,7 +2419,23 @@ export default function App() {
 
   const openHistorySession = (s) => {
     setSession(s);
+    setEditingExistingId(s.id);
     setView('log');
+  };
+
+  // Exit edit mode without saving: restore the live draft (or fresh session) and go back to history
+  const cancelEdit = async () => {
+    setEditingExistingId(null);
+    const draft = await storage.getDraft();
+    if (draft) {
+      if (!draft.programme) draft.programme = 'anterior';
+      setSession(draft);
+    } else {
+      const all = await storage.listSessions();
+      const next = await buildSessionForProgramme('anterior', all);
+      setSession(next);
+    }
+    setView('history');
   };
 
   const deleteHistorySession = async (id) => {
@@ -2452,10 +2513,10 @@ export default function App() {
       {showConfetti && <ConfettiOverlay />}
       {showSaveConfirm && (
         <ConfirmDialog
-          title="Ready to save?"
-          message="This will file the current session and reset for the next workout."
-          confirmLabel="SAVE"
-          cancelLabel="KEEP GOING"
+          title={editingExistingId ? 'Save changes?' : 'Ready to save?'}
+          message={editingExistingId ? 'This will overwrite the original session record.' : 'This will file the current session and reset for the next workout.'}
+          confirmLabel={editingExistingId ? 'SAVE' : 'SAVE'}
+          cancelLabel={editingExistingId ? 'BACK' : 'KEEP GOING'}
           onConfirm={saveCurrentSession}
           onCancel={() => setShowSaveConfirm(false)}
         />
@@ -2482,7 +2543,7 @@ export default function App() {
           }}
         />
       ) : (
-        <div className="min-h-screen bg-black pb-52" style={{ fontFamily: 'var(--font-body)' }}>
+        <div className="min-h-screen bg-black pb-52 overflow-x-hidden" style={{ fontFamily: 'var(--font-body)' }}>
           {/* Header */}
           <div className="bg-black border-b-4 border-white px-4 py-3 flex items-center justify-between sticky top-0 z-10">
             <div className="flex items-center gap-2">
@@ -2505,6 +2566,28 @@ export default function App() {
               </button>
             </div>
           </div>
+
+          {/* Edit mode banner - shown when editing a past session */}
+          {editingExistingId && session && (
+            <div className="bg-amber-600 text-black px-4 py-2.5 flex items-center justify-between sticky top-[68px] z-10">
+              <div className="flex items-center gap-2 min-w-0 flex-1">
+                <Edit3 className="w-4 h-4 shrink-0" />
+                <div className="min-w-0">
+                  <div className="text-[9px] tracking-[0.25em] font-bold uppercase leading-none" style={{ fontFamily: 'var(--font-display)' }}>EDITING PAST SESSION</div>
+                  <div className="text-xs font-mono mt-0.5 truncate">
+                    {session.date ? new Date(session.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }) : ''}
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={cancelEdit}
+                className="h-8 px-3 bg-black/20 hover:bg-black/30 active:bg-black/40 rounded text-[10px] font-bold tracking-widest flex items-center gap-1 shrink-0"
+                style={{ fontFamily: 'var(--font-display)' }}
+              >
+                <X className="w-3.5 h-3.5" /> CANCEL
+              </button>
+            </div>
+          )}
 
           {/* Session Meta: Date, Muscle Group, Duration, WHOOP */}
           <div className="px-4 pt-4 space-y-3">
@@ -2665,12 +2748,20 @@ export default function App() {
               />
               <button
                 onClick={() => setShowSaveConfirm(true)}
-                className={`w-full h-12 rounded-lg font-bold tracking-[0.2em] flex items-center justify-center gap-2 transition-colors ${savedFlash ? 'bg-green-500 text-black' : 'bg-white text-black active:bg-neutral-200'}`}
+                className={`w-full h-12 rounded-lg font-bold tracking-[0.2em] flex items-center justify-center gap-2 transition-colors ${
+                  savedFlash ? 'bg-green-500 text-black' :
+                  editingExistingId ? 'bg-amber-500 text-black active:bg-amber-600' :
+                  'bg-white text-black active:bg-neutral-200'
+                }`}
                 style={{ fontFamily: 'var(--font-display)' }}
               >
                 {savedFlash ? (
                   <>
                     <Check className="w-5 h-5" /> SAVED
+                  </>
+                ) : editingExistingId ? (
+                  <>
+                    <Save className="w-5 h-5" /> SAVE CHANGES
                   </>
                 ) : (
                   <>
@@ -2690,6 +2781,16 @@ export default function App() {
               weight: prev.setData[editingSet.setIdx].weight,
               reps: prev.setData[editingSet.setIdx].reps,
             } : null;
+            const handleDeleteSet = () => {
+              const updated = { ...ex };
+              if (editingSet.warmup) {
+                updated.warmupSets = (ex.warmupSets || []).filter((_, i) => i !== editingSet.setIdx);
+              } else {
+                updated.sets = (ex.sets || []).filter((_, i) => i !== editingSet.setIdx);
+              }
+              updateExercise(editingSet.exerciseIdx, updated);
+              setEditingSet(null);
+            };
             return (
               <SetEditor
                 exercise={ex}
@@ -2698,6 +2799,7 @@ export default function App() {
                 suggested={suggested}
                 onChange={(newEx) => updateExercise(editingSet.exerciseIdx, newEx)}
                 onClose={() => setEditingSet(null)}
+                onDeleteSet={handleDeleteSet}
               />
             );
           })()}
