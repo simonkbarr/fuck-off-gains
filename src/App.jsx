@@ -681,20 +681,20 @@ const ExerciseRow = ({
         <div className="pointer-events-none absolute top-12 bottom-8 right-0 w-6" style={{ background: 'linear-gradient(to left, #000 0%, transparent 100%)' }} />
       )}
       {/* Header row - toggle on LEFT, name on right */}
-      <div className="flex items-center mb-1 pl-2 pr-2 gap-3">
-        {/* Include toggle switch (iOS-style) - positioned left so it's never clipped */}
+      <div className="flex items-center mb-1 pl-2 pr-2 gap-4">
+        {/* Include toggle switch (iOS-style, compact) - positioned left so it is never clipped */}
         <button
           onClick={onToggleIncluded}
           role="switch"
           aria-checked={included}
           aria-label="Include in workout"
-          className={`shrink-0 relative h-6 w-11 rounded-full transition-colors duration-200 ${
+          className={`shrink-0 relative h-5 w-9 rounded-full transition-colors duration-200 ${
             included ? 'bg-green-500' : 'bg-neutral-800'
           }`}
         >
           <span
-            className={`absolute top-0.5 h-5 w-5 bg-white rounded-full shadow-md transition-transform duration-200 ${
-              included ? 'translate-x-[22px]' : 'translate-x-0.5'
+            className={`absolute top-0.5 h-4 w-4 bg-white rounded-full shadow-md transition-transform duration-200 ${
+              included ? 'translate-x-[18px]' : 'translate-x-0.5'
             }`}
           />
         </button>
