@@ -49,8 +49,8 @@ const createEmptySession = (template, programme = 'anterior', includedMap = null
     name: t.name,
     unit: t.unit,
     superset: t.superset || false,
-    // If we have a map of last-session included flags, use that. Default true.
-    included: includedMap ? (includedMap[t.name] !== false) : true,
+    // Fresh sessions always start with every exercise included. User can toggle off during workout.
+    included: true,
     warmupSets: [],
     sets: emptySets(t.sets),
   })),
@@ -108,17 +108,18 @@ const storage = {
   async deleteSession(id) {
     try { await window.storage.delete(`session:${id}`); } catch (e) { console.error(e); }
   },
-  // One-time migration: clears stored programme templates so the current
-  // PROGRAMMES defaults take effect. Bumped to 3 after the ANT/POS revert.
+  // One-time migration: clears stored programme templates AND stale draft so the current
+  // PROGRAMMES defaults + fresh-toggle logic take effect cleanly. Bumped to 4.
   async runSwapMigration() {
     try {
       const r = await window.storage.get('schema-version');
       const version = r ? Number(r.value) : 0;
-      if (version < 3) {
+      if (version < 4) {
         await window.storage.delete('template:anterior');
         await window.storage.delete('template:posterior');
         await window.storage.delete('template'); // legacy pre-programme key
-        await window.storage.set('schema-version', '3');
+        await window.storage.delete('draft'); // clear stale draft with mismatched toggles
+        await window.storage.set('schema-version', '4');
       }
     } catch (e) { console.error('Migration error:', e); }
   },
@@ -2469,7 +2470,14 @@ export default function App() {
   };
 
   const switchProgramme = async (newProgramme) => {
-    if (newProgramme === session?.programme) return;
+    // Tapping the same programme: offer a fresh reset in case state is stale
+    if (newProgramme === session?.programme) {
+      if (!confirm(`Reset ${PROGRAMMES[newProgramme].label} day to a fresh session? Current unsaved data will be lost.`)) return;
+      await storage.clearDraft();
+      const next = await buildSessionForProgramme(newProgramme, sessions);
+      setSession(next);
+      return;
+    }
     // Check if current session has any logged data
     const hasData = session?.exercises?.some((ex) =>
       ex.sets?.some((s) => s.reps || s.weight || s.time) ||
