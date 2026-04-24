@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Plus, Minus, Save, History, Trash2, X, Check, ChevronLeft, Edit3, FileText, Dumbbell, Zap, Timer, Play, Square, RotateCcw, Volume2, Download, Upload, AlertTriangle, Database, Mic, MicOff, Flame, Eye, EyeOff, Pause, Coffee } from 'lucide-react';
+import { Plus, Minus, Save, History, Trash2, X, Check, ChevronLeft, Edit3, FileText, Dumbbell, Zap, Timer, Play, Square, RotateCcw, Volume2, Download, Upload, AlertTriangle, Database, Mic, MicOff, Flame, Eye, EyeOff, Pause, Coffee, Trophy, TrendingUp, BarChart3, ArrowRight, Target } from 'lucide-react';
 
 // Workout programmes with their default exercise templates
 const PROGRAMMES = {
@@ -44,7 +44,7 @@ const createEmptySession = (template, programme = 'anterior', includedMap = null
   muscleGroup: '',
   durationMin: '',
   whoopRecovery: '',
-  whoopStrain: '',
+  whoopRelRecovery: '',
   exercises: template.map((t) => ({
     name: t.name,
     unit: t.unit,
@@ -108,6 +108,143 @@ const storage = {
   async deleteSession(id) {
     try { await window.storage.delete(`session:${id}`); } catch (e) { console.error(e); }
   },
+};
+
+// ============================================================
+// Stats Helper Functions - pure calculations over session data
+// ============================================================
+
+// Filter to included working sets only (warmups and excluded exercises removed)
+const workingSets = (session) => {
+  if (!session?.exercises) return [];
+  return session.exercises
+    .filter((ex) => ex.included !== false)
+    .flatMap((ex) => (ex.sets || []).map((s) => ({ ...s, _exercise: ex.name, _unit: ex.unit })));
+};
+
+// Sum of set times across working sets
+const sessionTUT = (session) => workingSets(session).reduce((sum, s) => sum + (Number(s.time) || 0), 0);
+
+// Total volume = weight × reps across non-BW working sets
+const sessionVolume = (session) => workingSets(session).reduce((sum, s) => {
+  if (s.bw || s._unit === 'bw') return sum; // BW exercises excluded from volume
+  const w = Number(s.weight) || 0;
+  const r = Number(s.reps) || 0;
+  return sum + w * r;
+}, 0);
+
+// Count of logged working sets (where at least one of time/reps/weight is set)
+const sessionSetCount = (session) => workingSets(session).filter((s) => (Number(s.time) || 0) > 0 || (Number(s.reps) || 0) > 0 || (Number(s.weight) || 0) > 0).length;
+
+// Average set time across logged sets
+const sessionAvgSetTime = (session) => {
+  const timed = workingSets(session).filter((s) => (Number(s.time) || 0) > 0);
+  if (timed.length === 0) return 0;
+  return timed.reduce((sum, s) => sum + Number(s.time), 0) / timed.length;
+};
+
+// Total reps across working sets
+const sessionTotalReps = (session) => workingSets(session).reduce((sum, s) => sum + (Number(s.reps) || 0), 0);
+
+// Get previous session of same programme (excludes the given session id)
+const findPreviousSameProgramme = (sessions, currentSession) => {
+  const programme = currentSession?.programme;
+  if (!programme || !sessions) return null;
+  const sorted = [...sessions]
+    .filter((s) => s.id !== currentSession.id && s.programme === programme)
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+  return sorted[0] || null;
+};
+
+// Detect personal records in the just-saved session
+const detectPRs = (currentSession, allSessions) => {
+  const prs = [];
+  if (!currentSession?.exercises) return prs;
+  const history = (allSessions || []).filter((s) => s.id !== currentSession.id);
+
+  currentSession.exercises.filter((ex) => ex.included !== false).forEach((ex) => {
+    // Find historical bests for this exercise
+    let histMaxWeight = 0;
+    let histMaxTime = 0;
+    let histMaxReps = 0;
+    history.forEach((s) => {
+      (s.exercises || []).filter((e) => e.name === ex.name && e.included !== false).forEach((e) => {
+        (e.sets || []).forEach((set) => {
+          histMaxWeight = Math.max(histMaxWeight, Number(set.weight) || 0);
+          histMaxTime = Math.max(histMaxTime, Number(set.time) || 0);
+          histMaxReps = Math.max(histMaxReps, Number(set.reps) || 0);
+        });
+      });
+    });
+
+    // Today's bests for this exercise
+    let todayMaxWeight = 0;
+    let todayMaxTime = 0;
+    let todayMaxReps = 0;
+    (ex.sets || []).forEach((set) => {
+      todayMaxWeight = Math.max(todayMaxWeight, Number(set.weight) || 0);
+      todayMaxTime = Math.max(todayMaxTime, Number(set.time) || 0);
+      todayMaxReps = Math.max(todayMaxReps, Number(set.reps) || 0);
+    });
+
+    // Only count as PR if there was historical data to beat
+    const hasHistory = histMaxWeight > 0 || histMaxTime > 0 || histMaxReps > 0;
+    if (!hasHistory) return;
+
+    if (todayMaxWeight > histMaxWeight && todayMaxWeight > 0 && ex.unit !== 'bw') {
+      prs.push({ exercise: ex.name, type: 'weight', prev: histMaxWeight, current: todayMaxWeight, unit: 'kg' });
+    }
+    if (todayMaxTime > histMaxTime && todayMaxTime > 0) {
+      prs.push({ exercise: ex.name, type: 'time', prev: histMaxTime, current: todayMaxTime, unit: 's' });
+    }
+    if (todayMaxReps > histMaxReps && todayMaxReps > 0 && ex.unit === 'bw') {
+      prs.push({ exercise: ex.name, type: 'reps', prev: histMaxReps, current: todayMaxReps, unit: 'r' });
+    }
+  });
+
+  return prs;
+};
+
+// Generate 3 highlights by biggest % improvement per exercise vs same-programme previous
+const generateHighlights = (currentSession, previousSession) => {
+  if (!previousSession) return ['First session of this programme - baseline set.'];
+
+  const deltas = [];
+  (currentSession.exercises || []).filter((ex) => ex.included !== false).forEach((ex) => {
+    const prevEx = (previousSession.exercises || []).find((e) => e.name === ex.name);
+    if (!prevEx || prevEx.included === false) return;
+
+    // TUT delta
+    const todayTUT = (ex.sets || []).reduce((s, set) => s + (Number(set.time) || 0), 0);
+    const prevTUT = (prevEx.sets || []).reduce((s, set) => s + (Number(set.time) || 0), 0);
+    if (todayTUT > prevTUT && prevTUT > 0) {
+      deltas.push({ exercise: ex.name, type: 'TUT', delta: todayTUT - prevTUT, pct: ((todayTUT - prevTUT) / prevTUT) * 100 });
+    }
+    // Volume delta
+    const todayVol = (ex.sets || []).reduce((s, set) => s + (Number(set.weight) || 0) * (Number(set.reps) || 0), 0);
+    const prevVol = (prevEx.sets || []).reduce((s, set) => s + (Number(set.weight) || 0) * (Number(set.reps) || 0), 0);
+    if (todayVol > prevVol && prevVol > 0) {
+      deltas.push({ exercise: ex.name, type: 'volume', delta: todayVol - prevVol, pct: ((todayVol - prevVol) / prevVol) * 100 });
+    }
+  });
+
+  deltas.sort((a, b) => b.pct - a.pct);
+  const highlights = deltas.slice(0, 3).map((d) => {
+    if (d.type === 'TUT') return `${d.exercise}: +${Math.round(d.delta)}s time under tension`;
+    return `${d.exercise}: +${Math.round(d.delta)} kg·reps volume`;
+  });
+  if (highlights.length === 0) highlights.push('Session logged. Consistency compounds.');
+  return highlights;
+};
+
+// Week-of-year key for grouping (ISO week approximation)
+const weekKey = (dateStr) => {
+  const d = new Date(dateStr);
+  if (isNaN(d)) return '';
+  const y = d.getFullYear();
+  const start = new Date(y, 0, 1);
+  const wk = Math.floor(((d - start) / 86400000 + start.getDay()) / 7);
+  return `${y}-W${String(wk).padStart(2, '0')}`;
 };
 
 // ============================================================
@@ -537,7 +674,7 @@ const ExerciseRow = ({
             </button>
           )}
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center shrink-0">
           {/* Include toggle switch (iOS-style) */}
           <button
             onClick={onToggleIncluded}
@@ -553,9 +690,6 @@ const ExerciseRow = ({
                 included ? 'translate-x-[22px]' : 'translate-x-0.5'
               }`}
             />
-          </button>
-          <button onClick={onDelete} className="text-neutral-600 p-1">
-            <Trash2 className="w-4 h-4" />
           </button>
         </div>
       </div>
@@ -693,7 +827,7 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
 
   const exportCSV = () => {
     try {
-      const header = ['date','muscle_group','duration_min','whoop_recovery','whoop_strain','rating','exercise','superset','set_num','reps','weight_kg','bodyweight','time_sec','to_failure','notes'];
+      const header = ['date','programme','duration_min','whoop_recovery','whoop_rel_recovery','whoop_strain_legacy','rating','exercise','superset','set_num','reps','weight_kg','bodyweight','time_sec','to_failure','notes'];
       const rows = [header];
       sessions.forEach((s) => {
         s.exercises.forEach((ex) => {
@@ -701,9 +835,10 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
             const isBW = set.bw || ex.unit === 'bw';
             rows.push([
               s.date || '',
-              s.muscleGroup || '',
+              s.programme || s.muscleGroup || '',
               s.durationMin || '',
               s.whoopRecovery || '',
+              s.whoopRelRecovery || '',
               s.whoopStrain || '',
               s.rating || '',
               ex.name,
@@ -887,7 +1022,8 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
                   {s.durationMin && <span>{s.durationMin}min</span>}
                   <span>{totalSets} sets</span>
                   {s.whoopRecovery && <span className="text-orange-400">Rec {s.whoopRecovery}%</span>}
-                  {s.whoopStrain && <span className="text-orange-400">Strain {s.whoopStrain}</span>}
+                  {s.whoopRelRecovery && <span className="text-orange-400">Rel Rec {s.whoopRelRecovery}</span>}
+                  {!s.whoopRelRecovery && s.whoopStrain && <span className="text-orange-400">Strain {s.whoopStrain}</span>}
                   {s.rating && <span>Rating {s.rating}/10</span>}
                 </div>
               </button>
@@ -1518,10 +1654,551 @@ const ConfettiOverlay = () => {
 };
 
 // ============================================================
+// Tiny SVG Chart Components - no external dependencies
+// ============================================================
+
+// Line chart for time-series progression. Data: [{ label, value }]
+const LineChart = ({ data, height = 90, color = '#f97316', accent = '#fb923c', showDots = true, unit = '' }) => {
+  if (!data || data.length === 0) return <div className="text-xs text-neutral-600 text-center py-4">No data yet</div>;
+  if (data.length === 1) {
+    return (
+      <div className="text-center py-3">
+        <div className="text-2xl font-mono font-bold text-orange-400">{data[0].value}{unit}</div>
+        <div className="text-[9px] text-neutral-500 tracking-widest mt-1">SINGLE DATA POINT</div>
+      </div>
+    );
+  }
+  const max = Math.max(...data.map((d) => d.value));
+  const min = Math.min(...data.map((d) => d.value));
+  const range = max - min || 1;
+  const w = 320;
+  const h = height;
+  const pad = 14;
+  const xStep = (w - pad * 2) / (data.length - 1);
+  const points = data.map((d, i) => {
+    const x = pad + i * xStep;
+    const y = h - pad - ((d.value - min) / range) * (h - pad * 2);
+    return { x, y, value: d.value, label: d.label };
+  });
+  const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ');
+  // Area fill gradient
+  const areaPath = `${path} L ${points[points.length - 1].x.toFixed(1)} ${h - pad} L ${points[0].x.toFixed(1)} ${h - pad} Z`;
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id={`lc-grad-${color.replace('#', '')}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={accent} stopOpacity="0.35" />
+          <stop offset="100%" stopColor={accent} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={areaPath} fill={`url(#lc-grad-${color.replace('#', '')})`} />
+      <path d={path} stroke={color} strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      {showDots && points.map((p, i) => (
+        <circle key={i} cx={p.x} cy={p.y} r={i === points.length - 1 ? 4 : 2.5} fill={i === points.length - 1 ? '#fff' : color} stroke={color} strokeWidth={i === points.length - 1 ? 2 : 0} />
+      ))}
+    </svg>
+  );
+};
+
+// Vertical bar chart. Data: [{ label, value }]
+const BarChart = ({ data, height = 90, color = '#f97316' }) => {
+  if (!data || data.length === 0) return <div className="text-xs text-neutral-600 text-center py-4">No data yet</div>;
+  const max = Math.max(...data.map((d) => d.value), 1);
+  const w = 320;
+  const h = height;
+  const pad = 14;
+  const barW = (w - pad * 2) / data.length - 4;
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full">
+      {data.map((d, i) => {
+        const bh = ((d.value / max) * (h - pad * 2));
+        const x = pad + i * ((w - pad * 2) / data.length) + 2;
+        const y = h - pad - bh;
+        return (
+          <g key={i}>
+            <rect x={x} y={y} width={barW} height={bh} fill={color} rx="2" />
+            <text x={x + barW / 2} y={h - 3} fontSize="8" fill="#737373" textAnchor="middle" fontFamily="monospace">{d.label}</text>
+            {d.value > 0 && <text x={x + barW / 2} y={y - 3} fontSize="9" fill="#fff" textAnchor="middle" fontFamily="monospace" fontWeight="bold">{d.value}</text>}
+          </g>
+        );
+      })}
+    </svg>
+  );
+};
+
+// Scatter plot for recovery vs performance
+const ScatterPlot = ({ data, height = 140, xLabel = 'Recovery %', yLabel = 'TUT' }) => {
+  if (!data || data.length < 2) return <div className="text-xs text-neutral-600 text-center py-6">Need at least 2 sessions with WHOOP recovery logged</div>;
+  const xs = data.map((d) => d.x);
+  const ys = data.map((d) => d.y);
+  const xMin = Math.min(...xs); const xMax = Math.max(...xs);
+  const yMin = Math.min(...ys); const yMax = Math.max(...ys);
+  const xRange = (xMax - xMin) || 1;
+  const yRange = (yMax - yMin) || 1;
+  const w = 320;
+  const h = height;
+  const pad = 24;
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full">
+      {/* axes */}
+      <line x1={pad} y1={h - pad} x2={w - 4} y2={h - pad} stroke="#404040" strokeWidth="1" />
+      <line x1={pad} y1={4} x2={pad} y2={h - pad} stroke="#404040" strokeWidth="1" />
+      {/* points */}
+      {data.map((d, i) => {
+        const x = pad + ((d.x - xMin) / xRange) * (w - pad - 8);
+        const y = (h - pad) - ((d.y - yMin) / yRange) * (h - pad - 8);
+        return <circle key={i} cx={x} cy={y} r="4" fill="#f97316" opacity="0.8" />;
+      })}
+      <text x={pad} y={h - 4} fontSize="8" fill="#737373" fontFamily="monospace">{xLabel}</text>
+      <text x={4} y={12} fontSize="8" fill="#737373" fontFamily="monospace">{yLabel}</text>
+    </svg>
+  );
+};
+
+// Metric card showing value + delta arrow vs previous
+const MetricCard = ({ label, value, subunit, prev, current, unit = '' }) => {
+  let deltaEl = null;
+  if (prev !== null && prev !== undefined && current !== null && current !== undefined && !isNaN(prev) && !isNaN(current)) {
+    const diff = current - prev;
+    if (Math.abs(diff) > 0.05) {
+      const up = diff > 0;
+      const absDiff = Math.abs(diff);
+      const formatted = absDiff < 10 ? absDiff.toFixed(1) : Math.round(absDiff);
+      deltaEl = (
+        <div className={`text-[10px] font-mono font-semibold ${up ? 'text-green-400' : 'text-orange-400'}`}>
+          {up ? '↑' : '↓'}{formatted}{unit}
+        </div>
+      );
+    } else {
+      deltaEl = <div className="text-[10px] font-mono font-semibold text-neutral-500">=</div>;
+    }
+  }
+  return (
+    <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-3">
+      <div className="flex items-start justify-between mb-1">
+        <div className="text-[9px] tracking-[0.2em] text-neutral-500 uppercase font-semibold leading-tight" style={{ fontFamily: 'var(--font-display)' }}>{label}</div>
+        {deltaEl}
+      </div>
+      <div className="flex items-baseline gap-1">
+        <div className="text-2xl text-white font-bold font-mono leading-none">{value}</div>
+        {subunit && <div className="text-[10px] text-neutral-500 font-mono">{subunit}</div>}
+      </div>
+    </div>
+  );
+};
+
+// ============================================================
+// Post-Save Summary Screen - shows right after confetti
+// ============================================================
+const SessionSummary = ({ justSaved, previousSameProgramme, allSessions, onContinue }) => {
+  const tut = sessionTUT(justSaved);
+  const prevTUT = previousSameProgramme ? sessionTUT(previousSameProgramme) : null;
+  const vol = sessionVolume(justSaved);
+  const prevVol = previousSameProgramme ? sessionVolume(previousSameProgramme) : null;
+  const sets = sessionSetCount(justSaved);
+  const prevSets = previousSameProgramme ? sessionSetCount(previousSameProgramme) : null;
+  const avgTime = sessionAvgSetTime(justSaved);
+  const prevAvg = previousSameProgramme ? sessionAvgSetTime(previousSameProgramme) : null;
+  const reps = sessionTotalReps(justSaved);
+  const prevReps = previousSameProgramme ? sessionTotalReps(previousSameProgramme) : null;
+
+  const prs = detectPRs(justSaved, allSessions);
+  const highlights = generateHighlights(justSaved, previousSameProgramme);
+  const programmeName = (PROGRAMMES[justSaved.programme]?.label || justSaved.programme || 'Session').toUpperCase();
+
+  return (
+    <div className="fixed inset-0 z-[9998] overflow-y-auto" style={{ backgroundColor: '#000000' }}>
+      <div className="min-h-screen p-5 pb-8 flex flex-col max-w-md mx-auto">
+        {/* Header */}
+        <div className="pt-6 pb-5 text-center">
+          <div className="text-[10px] tracking-[0.35em] text-orange-500 font-semibold uppercase mb-2" style={{ fontFamily: 'var(--font-display)' }}>{programmeName} COMPLETE</div>
+          <div className="text-3xl font-bold text-white tracking-widest leading-none" style={{ fontFamily: 'var(--font-display)' }}>SESSION BANKED</div>
+          {justSaved.durationMin && <div className="text-xs text-neutral-500 mt-3 font-mono">{justSaved.durationMin} min{justSaved.rating ? ` · rated ${justSaved.rating}/10` : ''}</div>}
+        </div>
+
+        {/* Metric grid */}
+        <div className="grid grid-cols-2 gap-2.5 mb-4">
+          <MetricCard label="Time Under Tension" value={tut} subunit="s" prev={prevTUT} current={tut} unit="s" />
+          <MetricCard label="Total Volume" value={Math.round(vol)} subunit="kg·r" prev={prevVol} current={vol} unit="" />
+          <MetricCard label="Avg Set Time" value={avgTime.toFixed(1)} subunit="s" prev={prevAvg} current={avgTime} unit="s" />
+          <MetricCard label="Sets Completed" value={sets} prev={prevSets} current={sets} unit="" />
+          <MetricCard label="Total Reps" value={reps} prev={prevReps} current={reps} unit="" />
+          {justSaved.whoopRecovery && <MetricCard label="WHOOP Recovery" value={justSaved.whoopRecovery} subunit="%" prev={previousSameProgramme?.whoopRecovery ? Number(previousSameProgramme.whoopRecovery) : null} current={Number(justSaved.whoopRecovery)} unit="%" />}
+        </div>
+
+        {/* PRs */}
+        {prs.length > 0 && (
+          <div className="mb-4 bg-amber-950/40 border-2 border-amber-600 rounded-xl p-4">
+            <div className="flex items-center gap-2 mb-3">
+              <Trophy className="w-5 h-5 text-amber-400" />
+              <span className="text-xs tracking-[0.3em] text-amber-400 font-bold uppercase" style={{ fontFamily: 'var(--font-display)' }}>Personal Bests</span>
+            </div>
+            <div className="space-y-1.5">
+              {prs.map((pr, i) => (
+                <div key={i} className="flex items-center justify-between text-sm">
+                  <span className="font-semibold text-white truncate pr-2">{pr.exercise}</span>
+                  <span className="text-amber-300 font-mono text-xs shrink-0">{pr.prev}{pr.unit} → <span className="text-amber-200 font-bold">{pr.current}{pr.unit}</span></span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Highlights */}
+        <div className="mb-4 bg-neutral-950 border border-neutral-800 rounded-xl p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <TrendingUp className="w-4 h-4 text-orange-500" />
+            <span className="text-[10px] tracking-[0.3em] text-neutral-400 font-bold uppercase" style={{ fontFamily: 'var(--font-display)' }}>Highlights</span>
+          </div>
+          <div className="space-y-2">
+            {highlights.map((h, i) => (
+              <div key={i} className="flex items-start gap-2 text-sm text-neutral-200">
+                <span className="text-orange-500 font-bold mt-0.5">→</span>
+                <span className="leading-snug">{h}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Comparison note */}
+        {previousSameProgramme ? (
+          <div className="text-[10px] text-neutral-600 font-mono text-center mb-4 tracking-wide">
+            vs {programmeName} on {new Date(previousSameProgramme.date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+          </div>
+        ) : (
+          <div className="text-[10px] text-neutral-600 font-mono text-center mb-4 tracking-wide">FIRST SESSION OF THIS PROGRAMME</div>
+        )}
+
+        {/* Continue button */}
+        <button
+          onClick={onContinue}
+          className="w-full h-14 bg-orange-500 text-black rounded-xl font-bold tracking-[0.25em] active:bg-orange-600 flex items-center justify-center gap-3"
+          style={{ fontFamily: 'var(--font-display)' }}
+        >
+          CONTINUE <ArrowRight className="w-5 h-5" />
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================
+// Stats View - deep analytics across all sessions
+// ============================================================
+const StatsView = ({ sessions, onBack }) => {
+  // Overview totals
+  const totals = useMemo(() => {
+    const sorted = [...sessions].sort((a, b) => new Date(a.date) - new Date(b.date));
+    let totalTUT = 0, totalVol = 0, totalReps = 0, totalSets = 0, totalMin = 0;
+    sorted.forEach((s) => {
+      totalTUT += sessionTUT(s);
+      totalVol += sessionVolume(s);
+      totalReps += sessionTotalReps(s);
+      totalSets += sessionSetCount(s);
+      totalMin += Number(s.durationMin) || 0;
+    });
+    // Streak: count consecutive weeks with at least one session
+    const weeks = new Set(sorted.map((s) => weekKey(s.date)).filter(Boolean));
+    return { sessions: sorted.length, totalTUT, totalVol, totalReps, totalSets, totalMin, weeksTrained: weeks.size };
+  }, [sessions]);
+
+  // Programme split
+  const programmeSplit = useMemo(() => {
+    const counts = { anterior: 0, posterior: 0, other: 0 };
+    sessions.forEach((s) => {
+      const p = s.programme || 'other';
+      if (counts[p] !== undefined) counts[p]++;
+      else counts.other++;
+    });
+    return counts;
+  }, [sessions]);
+
+  // Weekly frequency (last 8 weeks)
+  const weeklyFreq = useMemo(() => {
+    const now = new Date();
+    const out = [];
+    for (let i = 7; i >= 0; i--) {
+      const d = new Date(now);
+      d.setDate(d.getDate() - i * 7);
+      const key = weekKey(d.toISOString());
+      const count = sessions.filter((s) => weekKey(s.date) === key).length;
+      out.push({ label: d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }).split(' ')[0], value: count });
+    }
+    return out;
+  }, [sessions]);
+
+  // Per-exercise progression: group all sessions by exercise name, show TUT per session
+  const exerciseProgression = useMemo(() => {
+    const map = new Map();
+    const sorted = [...sessions].sort((a, b) => new Date(a.date) - new Date(b.date));
+    sorted.forEach((s) => {
+      (s.exercises || []).filter((ex) => ex.included !== false).forEach((ex) => {
+        if (!map.has(ex.name)) map.set(ex.name, []);
+        const tut = (ex.sets || []).reduce((sum, set) => sum + (Number(set.time) || 0), 0);
+        const vol = (ex.sets || []).reduce((sum, set) => sum + (Number(set.weight) || 0) * (Number(set.reps) || 0), 0);
+        const maxWeight = Math.max(0, ...(ex.sets || []).map((s) => Number(s.weight) || 0));
+        map.get(ex.name).push({
+          label: new Date(s.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }),
+          tut,
+          vol,
+          maxWeight,
+          date: s.date,
+        });
+      });
+    });
+    return Array.from(map.entries())
+      .filter(([, arr]) => arr.length >= 1)
+      .sort((a, b) => b[1].length - a[1].length);
+  }, [sessions]);
+
+  // Personal bests across all exercises
+  const personalBests = useMemo(() => {
+    const bests = new Map();
+    sessions.forEach((s) => {
+      (s.exercises || []).filter((ex) => ex.included !== false).forEach((ex) => {
+        if (!bests.has(ex.name)) bests.set(ex.name, { weight: { val: 0, date: null }, time: { val: 0, date: null }, reps: { val: 0, date: null }, unit: ex.unit });
+        const best = bests.get(ex.name);
+        (ex.sets || []).forEach((set) => {
+          const w = Number(set.weight) || 0;
+          const t = Number(set.time) || 0;
+          const r = Number(set.reps) || 0;
+          if (w > best.weight.val) best.weight = { val: w, date: s.date };
+          if (t > best.time.val) best.time = { val: t, date: s.date };
+          if (r > best.reps.val) best.reps = { val: r, date: s.date };
+        });
+      });
+    });
+    return Array.from(bests.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  }, [sessions]);
+
+  // WHOOP recovery vs TUT scatter
+  const recoveryScatter = useMemo(() => {
+    return sessions
+      .filter((s) => s.whoopRecovery && !isNaN(Number(s.whoopRecovery)))
+      .map((s) => ({ x: Number(s.whoopRecovery), y: sessionTUT(s) }));
+  }, [sessions]);
+
+  // Rating distribution
+  const ratingDist = useMemo(() => {
+    const buckets = Array.from({ length: 10 }, (_, i) => ({ label: String(i + 1), value: 0 }));
+    sessions.forEach((s) => {
+      const r = Number(s.rating);
+      if (r >= 1 && r <= 10) buckets[r - 1].value++;
+    });
+    return buckets;
+  }, [sessions]);
+
+  const [expanded, setExpanded] = useState(new Set());
+  const toggleExpanded = (name) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  };
+  const [exMetric, setExMetric] = useState('tut'); // 'tut' | 'vol' | 'weight'
+
+  if (sessions.length === 0) {
+    return (
+      <div className="min-h-screen bg-black text-white p-5">
+        <div className="flex items-center gap-3 mb-8">
+          <button onClick={onBack} className="w-10 h-10 bg-neutral-900 border border-neutral-800 rounded flex items-center justify-center active:bg-neutral-800">
+            <ChevronLeft className="w-5 h-5" />
+          </button>
+          <h1 className="text-xl tracking-widest" style={{ fontFamily: 'var(--font-display)' }}>STATS</h1>
+        </div>
+        <div className="text-center py-20">
+          <BarChart3 className="w-12 h-12 text-neutral-700 mx-auto mb-3" />
+          <div className="text-neutral-500">No sessions logged yet.</div>
+          <div className="text-xs text-neutral-600 mt-2">Stats will appear after your first save.</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-black text-white pb-8">
+      {/* Header */}
+      <div className="sticky top-0 z-10 bg-black border-b border-neutral-900 px-4 py-3 flex items-center gap-3">
+        <button onClick={onBack} className="w-10 h-10 bg-neutral-900 border border-neutral-800 rounded flex items-center justify-center active:bg-neutral-800">
+          <ChevronLeft className="w-5 h-5" />
+        </button>
+        <div>
+          <h1 className="text-xl tracking-widest leading-none" style={{ fontFamily: 'var(--font-display)' }}>STATS</h1>
+          <div className="text-[9px] tracking-widest text-neutral-500 mt-0.5">{totals.sessions} sessions · {totals.weeksTrained} weeks trained</div>
+        </div>
+      </div>
+
+      <div className="p-4 space-y-5 max-w-md mx-auto">
+        {/* Overview banner */}
+        <section>
+          <SectionTitle icon={<Target className="w-3.5 h-3.5" />}>ALL TIME</SectionTitle>
+          <div className="grid grid-cols-2 gap-2.5">
+            <MetricCard label="Sessions" value={totals.sessions} />
+            <MetricCard label="Hours in Gym" value={(totals.totalMin / 60).toFixed(1)} />
+            <MetricCard label="Total TUT" value={`${Math.round(totals.totalTUT / 60)}`} subunit="min" />
+            <MetricCard label="Total Volume" value={`${Math.round(totals.totalVol).toLocaleString()}`} subunit="kg·r" />
+            <MetricCard label="Total Sets" value={totals.totalSets} />
+            <MetricCard label="Total Reps" value={totals.totalReps} />
+          </div>
+        </section>
+
+        {/* Programme split */}
+        <section>
+          <SectionTitle icon={<Dumbbell className="w-3.5 h-3.5" />}>PROGRAMME SPLIT</SectionTitle>
+          <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-4">
+            {(() => {
+              const total = programmeSplit.anterior + programmeSplit.posterior + programmeSplit.other;
+              if (total === 0) return <div className="text-xs text-neutral-600 text-center py-2">No programme data</div>;
+              const antPct = (programmeSplit.anterior / total) * 100;
+              const postPct = (programmeSplit.posterior / total) * 100;
+              const otherPct = (programmeSplit.other / total) * 100;
+              return (
+                <>
+                  <div className="flex h-8 rounded overflow-hidden mb-3">
+                    {antPct > 0 && <div style={{ width: `${antPct}%` }} className="bg-orange-500 flex items-center justify-center text-[10px] text-black font-bold">{programmeSplit.anterior}</div>}
+                    {postPct > 0 && <div style={{ width: `${postPct}%` }} className="bg-green-500 flex items-center justify-center text-[10px] text-black font-bold">{programmeSplit.posterior}</div>}
+                    {otherPct > 0 && <div style={{ width: `${otherPct}%` }} className="bg-neutral-600 flex items-center justify-center text-[10px] text-black font-bold">{programmeSplit.other}</div>}
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] tracking-widest font-mono">
+                    <span className="text-orange-400">ANTERIOR {antPct.toFixed(0)}%</span>
+                    <span className="text-green-400">POSTERIOR {postPct.toFixed(0)}%</span>
+                    {programmeSplit.other > 0 && <span className="text-neutral-500">OTHER {otherPct.toFixed(0)}%</span>}
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </section>
+
+        {/* Weekly frequency */}
+        <section>
+          <SectionTitle icon={<BarChart3 className="w-3.5 h-3.5" />}>WEEKLY FREQUENCY · LAST 8 WEEKS</SectionTitle>
+          <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-3">
+            <BarChart data={weeklyFreq} height={110} />
+          </div>
+        </section>
+
+        {/* Rating distribution */}
+        {sessions.some((s) => s.rating) && (
+          <section>
+            <SectionTitle icon={<Flame className="w-3.5 h-3.5" />}>WORKOUT RATING DISTRIBUTION</SectionTitle>
+            <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-3">
+              <BarChart data={ratingDist} height={90} />
+            </div>
+          </section>
+        )}
+
+        {/* WHOOP Recovery vs TUT scatter */}
+        {recoveryScatter.length >= 2 && (
+          <section>
+            <SectionTitle icon={<Zap className="w-3.5 h-3.5" />}>RECOVERY vs PERFORMANCE</SectionTitle>
+            <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-3">
+              <ScatterPlot data={recoveryScatter} height={160} xLabel="Recovery %" yLabel="Session TUT" />
+              <div className="text-[9px] text-neutral-500 mt-1 text-center tracking-widest font-mono">{recoveryScatter.length} data points</div>
+            </div>
+          </section>
+        )}
+
+        {/* Per-exercise progression */}
+        {exerciseProgression.length > 0 && (
+          <section>
+            <div className="flex items-center justify-between mb-2">
+              <SectionTitle icon={<TrendingUp className="w-3.5 h-3.5" />} mb="mb-0">EXERCISE PROGRESSION</SectionTitle>
+            </div>
+            <div className="flex gap-1 mb-3 bg-neutral-900 p-1 rounded-lg">
+              {['tut', 'vol', 'weight'].map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setExMetric(m)}
+                  className={`flex-1 h-8 rounded-md text-[10px] tracking-widest font-bold ${exMetric === m ? 'bg-orange-500 text-black' : 'text-neutral-400'}`}
+                  style={{ fontFamily: 'var(--font-display)' }}
+                >
+                  {m === 'tut' ? 'TIME' : m === 'vol' ? 'VOLUME' : 'WEIGHT'}
+                </button>
+              ))}
+            </div>
+            <div className="space-y-2">
+              {exerciseProgression.map(([name, arr]) => {
+                const isOpen = expanded.has(name);
+                const latest = arr[arr.length - 1];
+                const first = arr[0];
+                const metricKey = exMetric === 'tut' ? 'tut' : exMetric === 'vol' ? 'vol' : 'maxWeight';
+                const unit = exMetric === 'tut' ? 's' : exMetric === 'vol' ? '' : 'kg';
+                const chartData = arr.map((a) => ({ label: a.label, value: a[metricKey] }));
+                const deltaVal = arr.length >= 2 ? latest[metricKey] - first[metricKey] : 0;
+                return (
+                  <div key={name} className="bg-neutral-950 border border-neutral-800 rounded-xl overflow-hidden">
+                    <button onClick={() => toggleExpanded(name)} className="w-full p-3 flex items-center justify-between text-left active:bg-neutral-900">
+                      <div className="min-w-0 flex-1 pr-2">
+                        <div className="text-sm font-semibold text-white truncate">{name}</div>
+                        <div className="text-[10px] text-neutral-500 font-mono mt-0.5">{arr.length} session{arr.length === 1 ? '' : 's'} · latest {latest[metricKey]}{unit}</div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {arr.length >= 2 && (
+                          <span className={`text-[11px] font-mono font-bold ${deltaVal > 0 ? 'text-green-400' : deltaVal < 0 ? 'text-orange-400' : 'text-neutral-500'}`}>
+                            {deltaVal > 0 ? '↑' : deltaVal < 0 ? '↓' : '='}{Math.abs(Math.round(deltaVal))}{unit}
+                          </span>
+                        )}
+                        <span className="text-neutral-600 text-xs">{isOpen ? '▲' : '▼'}</span>
+                      </div>
+                    </button>
+                    {isOpen && (
+                      <div className="border-t border-neutral-900 p-3">
+                        <LineChart data={chartData} height={110} unit={unit} />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* Personal bests */}
+        {personalBests.length > 0 && (
+          <section>
+            <SectionTitle icon={<Trophy className="w-3.5 h-3.5" />}>PERSONAL BESTS</SectionTitle>
+            <div className="bg-neutral-950 border border-neutral-800 rounded-xl overflow-hidden divide-y divide-neutral-900">
+              {personalBests.map(([name, best]) => (
+                <div key={name} className="p-3">
+                  <div className="text-sm font-semibold text-white mb-1.5 truncate">{name}</div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-mono">
+                    {best.weight.val > 0 && best.unit !== 'bw' && (
+                      <span className="text-amber-400">MAX {best.weight.val}kg<span className="text-neutral-600"> · {new Date(best.weight.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
+                    )}
+                    {best.time.val > 0 && (
+                      <span className="text-sky-400">TUT {best.time.val}s<span className="text-neutral-600"> · {new Date(best.time.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
+                    )}
+                    {best.reps.val > 0 && best.unit === 'bw' && (
+                      <span className="text-green-400">REPS {best.reps.val}<span className="text-neutral-600"> · {new Date(best.reps.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <div className="text-center text-[9px] text-neutral-700 tracking-widest font-mono pt-4">END OF STATS</div>
+      </div>
+    </div>
+  );
+};
+
+// Small helper for stats section titles
+const SectionTitle = ({ children, icon, mb = 'mb-2' }) => (
+  <div className={`flex items-center gap-2 ${mb}`}>
+    {icon && <span className="text-orange-500">{icon}</span>}
+    <h2 className="text-[10px] tracking-[0.3em] text-neutral-400 font-bold uppercase" style={{ fontFamily: 'var(--font-display)' }}>{children}</h2>
+  </div>
+);
+
+// ============================================================
 // Main App
 // ============================================================
 export default function App() {
-  const [view, setView] = useState('log'); // 'log' | 'history'
+  const [view, setView] = useState('log'); // 'log' | 'history' | 'stats'
   const [session, setSession] = useState(null);
   const [sessions, setSessions] = useState([]);
   const [editingSet, setEditingSet] = useState(null); // {exerciseIdx, setIdx, warmup?}
@@ -1530,6 +2207,7 @@ export default function App() {
   const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [showConfetti, setShowConfetti] = useState(false);
   const [showSaveConfirm, setShowSaveConfirm] = useState(false);
+  const [summaryData, setSummaryData] = useState(null); // { justSaved, previousSameProgramme } when summary should show
 
   // Helper: build an "included" flags map from most recent session of same programme
   const buildIncludedMap = (sessionsList, programme) => {
@@ -1666,16 +2344,22 @@ export default function App() {
 
   const saveCurrentSession = async () => {
     setShowSaveConfirm(false);
-    await storage.saveSession(session);
+    // Stamp id/date if missing so summary/detectPRs can identify it
+    const toSave = { ...session };
+    if (!toSave.id) toSave.id = `s_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    if (!toSave.date) toSave.date = new Date().toISOString();
+    await storage.saveSession(toSave);
     await storage.clearDraft();
     const all = await storage.listSessions();
     setSessions(all);
     // Save template from current exercise list, per-programme
-    const template = session.exercises.map((e) => ({
+    const template = toSave.exercises.map((e) => ({
       name: e.name, unit: e.unit, sets: e.sets.length, superset: e.superset,
     }));
-    const programme = session.programme || 'anterior';
+    const programme = toSave.programme || 'anterior';
     await storage.setTemplate(template, programme);
+    // Find previous same-programme session for comparison (excluding the one we just saved)
+    const previousSameProgramme = findPreviousSameProgramme(all, toSave);
     // Next session defaults to same programme but user can switch
     const next = await buildSessionForProgramme(programme, all);
     setSession(next);
@@ -1684,6 +2368,8 @@ export default function App() {
     // Bicep confetti celebration
     setShowConfetti(true);
     setTimeout(() => setShowConfetti(false), 4500);
+    // Show post-save summary after a short beat so confetti is visible first
+    setTimeout(() => setSummaryData({ justSaved: toSave, previousSameProgramme, allSessions: all }), 400);
   };
 
   const openHistorySession = (s) => {
@@ -1774,7 +2460,17 @@ export default function App() {
           onCancel={() => setShowSaveConfirm(false)}
         />
       )}
-      {view === 'history' ? (
+      {summaryData && (
+        <SessionSummary
+          justSaved={summaryData.justSaved}
+          previousSameProgramme={summaryData.previousSameProgramme}
+          allSessions={summaryData.allSessions}
+          onContinue={() => setSummaryData(null)}
+        />
+      )}
+      {view === 'stats' ? (
+        <StatsView sessions={sessions} onBack={() => setView('log')} />
+      ) : view === 'history' ? (
         <HistoryView
           sessions={sessions}
           onBack={() => setView('log')}
@@ -1798,6 +2494,9 @@ export default function App() {
               </h1>
             </div>
             <div className="flex gap-2">
+              <button onClick={() => setView('stats')} className="w-10 h-10 bg-neutral-900 border border-neutral-800 rounded flex items-center justify-center active:bg-neutral-800" aria-label="Stats">
+                <BarChart3 className="w-5 h-5 text-neutral-300" />
+              </button>
               <button onClick={() => setView('history')} className="w-10 h-10 bg-neutral-900 border border-neutral-800 rounded flex items-center justify-center active:bg-neutral-800">
                 <History className="w-5 h-5 text-neutral-300" />
               </button>
@@ -1853,17 +2552,15 @@ export default function App() {
                   />
                 </div>
                 <div>
-                  <label className="text-[10px] tracking-widest text-neutral-500 uppercase block mb-1">Day Strain</label>
+                  <label className="text-[10px] tracking-widest text-neutral-500 uppercase block mb-1">Relative Recovery</label>
                   <input
                     type="number"
                     inputMode="decimal"
                     step="0.1"
-                    min="0"
-                    max="21"
-                    value={session.whoopStrain}
-                    onChange={(e) => updateSession({ whoopStrain: e.target.value })}
+                    value={session.whoopRelRecovery}
+                    onChange={(e) => updateSession({ whoopRelRecovery: e.target.value })}
                     className="w-full bg-black border border-neutral-800 text-white px-3 h-11 rounded text-lg text-center"
-                    placeholder="8.5"
+                    placeholder="0"
                   />
                 </div>
               </div>
