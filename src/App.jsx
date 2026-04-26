@@ -1234,19 +1234,43 @@ const TimerWidget = ({ compact = false, voiceEnabled = false, onVoiceToggle, onS
     const ctx = getAudio();
     if (!ctx) return;
     try {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      osc.connect(gain);
-      gain.connect(ctx.destination);
       const now = ctx.currentTime;
       const dur = durationMs / 1000;
-      gain.gain.setValueAtTime(0, now);
-      gain.gain.linearRampToValueAtTime(vol, now + 0.01);
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-      osc.start(now);
-      osc.stop(now + dur);
+      // Master gain - amplify the whole stack. Doubling perceived loudness vs old sine.
+      const master = ctx.createGain();
+      master.connect(ctx.destination);
+      // Gain envelope: snap on, hold, then exponential decay
+      master.gain.setValueAtTime(0, now);
+      master.gain.linearRampToValueAtTime(Math.min(1.0, vol * 1.8), now + 0.005);
+      master.gain.setValueAtTime(Math.min(1.0, vol * 1.8), now + Math.max(0.01, dur - 0.05));
+      master.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+      // Primary oscillator - triangle wave is louder-sounding than sine but still pleasant
+      const osc1 = ctx.createOscillator();
+      osc1.type = 'triangle';
+      osc1.frequency.value = freq;
+      const g1 = ctx.createGain();
+      g1.gain.value = 0.85;
+      osc1.connect(g1);
+      g1.connect(master);
+      // Secondary oscillator one octave up at lower volume - adds harmonic richness, perceived as louder
+      const osc2 = ctx.createOscillator();
+      osc2.type = 'sine';
+      osc2.frequency.value = freq * 2;
+      const g2 = ctx.createGain();
+      g2.gain.value = 0.35;
+      osc2.connect(g2);
+      g2.connect(master);
+      // Subtle square at fundamental for extra punch on the attack
+      const osc3 = ctx.createOscillator();
+      osc3.type = 'square';
+      osc3.frequency.value = freq;
+      const g3 = ctx.createGain();
+      g3.gain.value = 0.18;
+      osc3.connect(g3);
+      g3.connect(master);
+      osc1.start(now); osc1.stop(now + dur);
+      osc2.start(now); osc2.stop(now + dur);
+      osc3.start(now); osc3.stop(now + dur);
     } catch (e) { /* ignore */ }
   };
 
