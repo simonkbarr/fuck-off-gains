@@ -970,14 +970,31 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
     try {
       const all = await window.storage.list();
       const sessionKeys = (all?.keys || []).filter((k) => k.startsWith('session:'));
-      const hasTemplate = (all?.keys || []).includes('template');
+      const hasTemplate = (all?.keys || []).includes('template') || (all?.keys || []).includes('template:anterior') || (all?.keys || []).includes('template:posterior');
       const hasDraft = (all?.keys || []).includes('draft');
+      // Also load every session and report date + programme so we can see which sessions exist and what they're tagged as
+      const sessionDetails = [];
+      for (const key of sessionKeys) {
+        try {
+          const v = await window.storage.get(key);
+          if (v) {
+            const s = JSON.parse(v.value);
+            sessionDetails.push({
+              date: String(s.date || '').slice(0, 10),
+              programme: s.programme || '(none)',
+              id: s.id,
+            });
+          }
+        } catch (_) {}
+      }
+      sessionDetails.sort((a, b) => (b.date > a.date ? 1 : -1));
       setDiagnostic({
         totalKeys: all?.keys?.length || 0,
         sessionKeys: sessionKeys.length,
         hasTemplate,
         hasDraft,
         allKeys: all?.keys || [],
+        sessionDetails,
       });
     } catch (e) {
       setDiagnostic({ error: e.message });
@@ -1040,6 +1057,19 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
                 <div>Session keys: <span className="text-white">{diagnostic.sessionKeys}</span></div>
                 <div>Template saved: <span className="text-white">{diagnostic.hasTemplate ? 'yes' : 'no'}</span></div>
                 <div>Draft in progress: <span className="text-white">{diagnostic.hasDraft ? 'yes' : 'no'}</span></div>
+                {diagnostic.sessionDetails && diagnostic.sessionDetails.length > 0 && (
+                  <div className="mt-2 pt-2 border-t border-neutral-900">
+                    <div className="text-neutral-400 mb-1">Sessions (newest first):</div>
+                    {diagnostic.sessionDetails.map((s, i) => (
+                      <div key={i} className="flex justify-between text-[10px]">
+                        <span className="text-white">{s.date}</span>
+                        <span className={s.programme === 'anterior' ? 'text-orange-400' : s.programme === 'posterior' ? 'text-green-400' : 'text-neutral-500'}>
+                          {s.programme}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {diagnostic.allKeys.length > 0 && (
                   <details className="mt-2">
                     <summary className="cursor-pointer text-neutral-500">All keys ({diagnostic.allKeys.length})</summary>
@@ -2515,17 +2545,14 @@ export default function App() {
   const previousByExercise = useMemo(() => {
     const map = {};
     const currentProgramme = session?.programme;
-    const currentId = session?.id;
-    // Only exclude the current session if it's actually saved (i.e., present in the sessions list).
-    // Drafts have an id but aren't in the list yet; using id-equality alone could accidentally
-    // exclude a saved session whose id happens to match the draft's.
-    const currentIsSaved = currentId !== undefined && sessions.some((s) => s.id === currentId);
-    // Filter to same-programme sessions, sort newest first by date (YYYY-MM-DD lexicographic works here)
+    // Only exclude the loaded session if we're actively editing an existing one. For fresh
+    // drafts we never exclude (drafts shouldn't accidentally hide saved data even if their ids collide).
+    const excludeId = editingExistingId || null;
+    // Filter to same-programme sessions, sort newest first by date string (YYYY-MM-DD lexicographic works)
     const pool = sessions
-      .filter((s) => !currentIsSaved || s.id !== currentId)
+      .filter((s) => !excludeId || s.id !== excludeId)
       .filter((s) => !currentProgramme || s.programme === currentProgramme)
       .sort((a, b) => {
-        // Compare normalised date strings first for max reliability
         const dateA = String(a.date || '').slice(0, 10);
         const dateB = String(b.date || '').slice(0, 10);
         if (dateB !== dateA) return dateB > dateA ? 1 : -1;
@@ -2583,7 +2610,7 @@ export default function App() {
       }
     }
     return map;
-  }, [sessions, session?.id, session?.programme]);
+  }, [sessions, editingExistingId, session?.programme]);
 
   const updateSession = (patch) => setSession((s) => ({ ...s, ...patch }));
 
