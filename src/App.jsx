@@ -1744,7 +1744,46 @@ const TimerWidget = ({ compact = false, voiceEnabled = false, onVoiceToggle, onS
 // ============================================================
 // Custom Confirm Dialog - reliable in iOS PWAs where native confirm() can be blocked
 // ============================================================
-const ConfirmDialog = ({ title, message, confirmLabel = 'CONFIRM', cancelLabel = 'CANCEL', onConfirm, onCancel }) => {
+const ConfirmDialog = ({ title, message, confirmLabel = 'CONFIRM', cancelLabel = 'CANCEL', onConfirm, onCancel, danger = false, holdMs = 2000 }) => {
+  // Hold-to-confirm state for danger mode (e.g., overwriting historical data)
+  const [holdProgress, setHoldProgress] = useState(0);
+  const holdTimerRef = useRef(null);
+  const holdStartRef = useRef(0);
+  const completedRef = useRef(false);
+
+  const startHold = (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    if (completedRef.current) return;
+    holdStartRef.current = Date.now();
+    if (holdTimerRef.current) clearInterval(holdTimerRef.current);
+    holdTimerRef.current = setInterval(() => {
+      const pct = Math.min(100, ((Date.now() - holdStartRef.current) / holdMs) * 100);
+      setHoldProgress(pct);
+      if (pct >= 100 && !completedRef.current) {
+        completedRef.current = true;
+        clearInterval(holdTimerRef.current);
+        holdTimerRef.current = null;
+        onConfirm();
+      }
+    }, 30);
+  };
+
+  const cancelHold = () => {
+    if (completedRef.current) return;
+    if (holdTimerRef.current) {
+      clearInterval(holdTimerRef.current);
+      holdTimerRef.current = null;
+    }
+    setHoldProgress(0);
+  };
+
+  // Cleanup on unmount
+  useEffect(() => () => { if (holdTimerRef.current) clearInterval(holdTimerRef.current); }, []);
+
+  const borderColor = danger ? 'border-red-500' : 'border-orange-500';
+  const confirmBg = danger ? 'bg-red-600' : 'bg-orange-500';
+  const confirmActive = danger ? 'active:bg-red-700' : 'active:bg-orange-600';
+
   return (
     <div
       className="fixed inset-0 flex items-center justify-center p-6"
@@ -1757,14 +1796,19 @@ const ConfirmDialog = ({ title, message, confirmLabel = 'CONFIRM', cancelLabel =
       }}
     >
       <div
-        className="border-2 border-orange-500 rounded-2xl p-5 w-full max-w-sm shadow-2xl"
+        className={`border-2 ${borderColor} rounded-2xl p-5 w-full max-w-sm shadow-2xl`}
         onClick={(e) => e.stopPropagation()}
         style={{ backgroundColor: '#000000' }}
       >
         <div className="text-xl font-bold text-white mb-2 tracking-wide" style={{ fontFamily: 'var(--font-display)' }}>
           {title}
         </div>
-        {message && <div className="text-sm text-neutral-400 mb-5">{message}</div>}
+        {message && <div className="text-sm text-neutral-400 mb-5 whitespace-pre-line">{message}</div>}
+        {danger && (
+          <div className="mb-3 text-[11px] text-red-400 font-mono tracking-wide bg-red-950/40 border border-red-900 rounded p-2">
+            HOLD the red button for 2 seconds to overwrite the historic record. Release to cancel.
+          </div>
+        )}
         <div className="flex gap-3 mt-4">
           <button
             onClick={onCancel}
@@ -1773,13 +1817,35 @@ const ConfirmDialog = ({ title, message, confirmLabel = 'CONFIRM', cancelLabel =
           >
             {cancelLabel}
           </button>
-          <button
-            onClick={onConfirm}
-            className="flex-1 h-12 bg-orange-500 text-black rounded-lg font-bold tracking-[0.15em] active:bg-orange-600"
-            style={{ fontFamily: 'var(--font-display)' }}
-          >
-            {confirmLabel}
-          </button>
+          {danger ? (
+            <button
+              onMouseDown={startHold}
+              onMouseUp={cancelHold}
+              onMouseLeave={cancelHold}
+              onTouchStart={startHold}
+              onTouchEnd={cancelHold}
+              onTouchCancel={cancelHold}
+              onContextMenu={(e) => e.preventDefault()}
+              className={`flex-1 h-12 ${confirmBg} ${confirmActive} text-white rounded-lg font-bold tracking-[0.15em] relative overflow-hidden select-none`}
+              style={{ fontFamily: 'var(--font-display)', WebkitUserSelect: 'none', userSelect: 'none', WebkitTouchCallout: 'none' }}
+            >
+              <span
+                className="absolute inset-0 bg-white/30 origin-left transition-none"
+                style={{ transform: `scaleX(${holdProgress / 100})` }}
+              />
+              <span className="relative z-10">
+                {holdProgress > 0 && holdProgress < 100 ? `${Math.round(holdProgress)}%` : confirmLabel}
+              </span>
+            </button>
+          ) : (
+            <button
+              onClick={onConfirm}
+              className={`flex-1 h-12 ${confirmBg} ${confirmActive} text-black rounded-lg font-bold tracking-[0.15em]`}
+              style={{ fontFamily: 'var(--font-display)' }}
+            >
+              {confirmLabel}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -2876,10 +2942,13 @@ export default function App() {
       {showConfetti && <ConfettiOverlay />}
       {showSaveConfirm && (
         <ConfirmDialog
-          title={editingExistingId ? 'Save changes?' : 'Ready to save?'}
-          message={editingExistingId ? 'This will overwrite the original session record.' : 'This will file the current session and reset for the next workout.'}
-          confirmLabel={editingExistingId ? 'SAVE' : 'SAVE'}
+          title={editingExistingId ? 'Overwrite past session?' : 'Ready to save?'}
+          message={editingExistingId
+            ? 'You are about to permanently change a previously saved session.\n\nHold the red button to confirm. Release to cancel.'
+            : 'This will file the current session and reset for the next workout.'}
+          confirmLabel={editingExistingId ? 'HOLD TO OVERWRITE' : 'SAVE'}
           cancelLabel={editingExistingId ? 'BACK' : 'KEEP GOING'}
+          danger={!!editingExistingId}
           onConfirm={saveCurrentSession}
           onCancel={() => setShowSaveConfirm(false)}
         />
@@ -2906,18 +2975,37 @@ export default function App() {
           }}
         />
       ) : (
-        <div className="min-h-screen bg-black pb-52 overflow-x-hidden" style={{ fontFamily: 'var(--font-body)' }}>
+        <div className="min-h-screen bg-black pb-40 overflow-x-hidden" style={{ fontFamily: 'var(--font-body)' }}>
           {/* Header */}
-          <div className="bg-black border-b-4 border-white px-4 py-3 flex items-center justify-between sticky top-0 z-10">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 bg-orange-500 flex items-center justify-center rounded">
+          <div className="bg-black border-b-4 border-white px-3 py-3 flex items-center justify-between sticky top-0 z-10 gap-2">
+            <div className="flex items-center gap-2 min-w-0 shrink">
+              <div className="w-8 h-8 bg-orange-500 flex items-center justify-center rounded shrink-0">
                 <Dumbbell className="w-5 h-5 text-black" />
               </div>
-              <h1 className="text-xl text-white tracking-widest leading-none" style={{ fontFamily: 'var(--font-display)' }}>
-                FUCK OFF<br/><span className="text-orange-500 text-sm tracking-[0.3em]">GAINS TRACKER</span>
+              <h1 className="text-base text-white tracking-widest leading-none truncate" style={{ fontFamily: 'var(--font-display)' }}>
+                FUCK OFF<br/><span className="text-orange-500 text-[10px] tracking-[0.3em]">GAINS TRACKER</span>
               </h1>
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-1.5 shrink-0">
+              <button
+                onClick={() => setShowSaveConfirm(true)}
+                className={`h-10 px-3 rounded flex items-center justify-center gap-1.5 active:opacity-80 transition-colors ${
+                  savedFlash ? 'bg-green-500 text-black' :
+                  editingExistingId ? 'bg-amber-500 text-black' :
+                  'bg-white text-black'
+                }`}
+                style={{ fontFamily: 'var(--font-display)' }}
+                aria-label={editingExistingId ? 'Save changes' : 'Save session'}
+              >
+                {savedFlash ? (
+                  <Check className="w-4 h-4" />
+                ) : (
+                  <>
+                    <Save className="w-4 h-4" />
+                    <span className="text-[10px] font-bold tracking-widest">SAVE</span>
+                  </>
+                )}
+              </button>
               <button onClick={() => setView('stats')} className="w-10 h-10 bg-neutral-900 border border-neutral-800 rounded flex items-center justify-center active:bg-neutral-800" aria-label="Stats">
                 <BarChart3 className="w-5 h-5 text-neutral-300" />
               </button>
@@ -2954,26 +3042,26 @@ export default function App() {
 
           {/* Session Meta: Date, Muscle Group, Duration, WHOOP */}
           <div className="px-4 pt-4 space-y-3">
-            <div className="grid gap-3" style={{ gridTemplateColumns: '5fr 3fr' }}>
-              <div className="min-w-0">
+            <div className="flex gap-3">
+              <div className="flex-1 min-w-0">
                 <label className="text-[10px] tracking-[0.2em] text-neutral-500 uppercase block mb-1" style={{ fontFamily: 'var(--font-display)' }}>Date</label>
                 <input
                   type="date"
                   value={session.date}
                   onChange={(e) => updateSession({ date: e.target.value })}
-                  className="w-full bg-neutral-900 border border-neutral-800 text-white px-2 h-11 rounded text-[13px] block"
-                  style={{ minWidth: 0, maxWidth: '100%' }}
+                  className="w-full bg-neutral-900 border border-neutral-800 text-white px-2 h-11 rounded text-[13px] block text-left"
+                  style={{ minWidth: 0, maxWidth: '100%', WebkitAppearance: 'none', appearance: 'none', textAlign: 'left' }}
                 />
               </div>
-              <div className="min-w-0">
-                <label className="text-[10px] tracking-[0.2em] text-neutral-500 uppercase block mb-1" style={{ fontFamily: 'var(--font-display)' }}>Duration (min)</label>
+              <div className="shrink-0" style={{ width: '90px' }}>
+                <label className="text-[10px] tracking-[0.2em] text-neutral-500 uppercase block mb-1" style={{ fontFamily: 'var(--font-display)' }}>Duration</label>
                 <input
                   type="number"
                   inputMode="numeric"
                   value={session.durationMin}
                   onChange={(e) => updateSession({ durationMin: e.target.value })}
                   className="w-full bg-neutral-900 border border-neutral-800 text-white px-2 h-11 rounded text-[13px] text-center"
-                  style={{ minWidth: 0, maxWidth: '100%' }}
+                  style={{ minWidth: 0 }}
                   placeholder="60"
                 />
               </div>
@@ -3120,29 +3208,6 @@ export default function App() {
                 onVoiceToggle={() => setVoiceEnabled((v) => !v)}
                 onStop={handleTimerStop}
               />
-              <button
-                onClick={() => setShowSaveConfirm(true)}
-                className={`w-full h-12 rounded-lg font-bold tracking-[0.2em] flex items-center justify-center gap-2 transition-colors ${
-                  savedFlash ? 'bg-green-500 text-black' :
-                  editingExistingId ? 'bg-amber-500 text-black active:bg-amber-600' :
-                  'bg-white text-black active:bg-neutral-200'
-                }`}
-                style={{ fontFamily: 'var(--font-display)' }}
-              >
-                {savedFlash ? (
-                  <>
-                    <Check className="w-5 h-5" /> SAVED
-                  </>
-                ) : editingExistingId ? (
-                  <>
-                    <Save className="w-5 h-5" /> SAVE CHANGES
-                  </>
-                ) : (
-                  <>
-                    <Save className="w-5 h-5" /> SAVE SESSION
-                  </>
-                )}
-              </button>
             </div>
           </div>
 
