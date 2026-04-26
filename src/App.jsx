@@ -136,6 +136,35 @@ const storage = {
         await window.storage.delete('draft'); // clear stale draft with phantom trailing cells
         await window.storage.set('schema-version', '5');
       }
+      // v6: repair untagged sessions by inferring programme from their exercise list.
+      // Anterior signature exercises: Heel Raise Goblet Squat, Bicep Curl, Press Up.
+      // Posterior signature exercises: Standing Hamstring Curl, Roman Dead Lift, Tripcep Push Down Rope.
+      if (version < 6) {
+        const ANTERIOR_SIG = ['Heel Raise Goblet Squat', 'Bicep Curl', 'Press Up', 'Incline DB Chest Press', 'DB Lat Raise', 'Leg Extension', 'Ab Crunch'];
+        const POSTERIOR_SIG = ['Standing Hamstring Curl', 'Roman Dead Lift', 'Tripcep Push Down Rope', 'Lateral Pull Down (narrow/neutral)', 'Chest Supported Row (narrow)', 'Rear Flys'];
+        const all = await window.storage.list('session:');
+        const keys = all?.keys || [];
+        let repaired = 0;
+        for (const key of keys) {
+          try {
+            const v = await window.storage.get(key);
+            if (!v) continue;
+            const s = JSON.parse(v.value);
+            if (s.programme === 'anterior' || s.programme === 'posterior') continue;
+            // Untagged - infer from exercises
+            const names = (s.exercises || []).map((e) => e.name);
+            const antScore = names.filter((n) => ANTERIOR_SIG.includes(n)).length;
+            const postScore = names.filter((n) => POSTERIOR_SIG.includes(n)).length;
+            if (antScore > postScore) s.programme = 'anterior';
+            else if (postScore > antScore) s.programme = 'posterior';
+            else continue; // truly ambiguous, skip
+            await window.storage.set(key, JSON.stringify(s));
+            repaired++;
+          } catch (_) {}
+        }
+        await window.storage.set('schema-version', '6');
+        if (repaired > 0) console.log(`Repaired ${repaired} untagged session(s).`);
+      }
     } catch (e) { console.error('Migration error:', e); }
   },
 };
@@ -2760,7 +2789,7 @@ export default function App() {
     // EDIT MODE: just re-tag the session's programme, never touch the exercise list.
     // This is how you fix a past session that was logged under the wrong programme.
     if (editingExistingId) {
-      if (!confirm(`Re-tag this session as ${PROGRAMMES[newProgramme].label}? Exercise data will be kept exactly as logged.`)) return;
+      if (!confirm(`Re-tag this session as ${PROGRAMMES[newProgramme].label}?\n\nExercise data will be kept exactly as logged. You must tap SAVE CHANGES at the bottom to make this stick.`)) return;
       setSession((s) => ({ ...s, programme: newProgramme }));
       return;
     }
