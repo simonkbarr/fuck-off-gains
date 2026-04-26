@@ -2954,24 +2954,26 @@ export default function App() {
 
           {/* Session Meta: Date, Muscle Group, Duration, WHOOP */}
           <div className="px-4 pt-4 space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
+            <div className="grid gap-3" style={{ gridTemplateColumns: '5fr 3fr' }}>
+              <div className="min-w-0">
                 <label className="text-[10px] tracking-[0.2em] text-neutral-500 uppercase block mb-1" style={{ fontFamily: 'var(--font-display)' }}>Date</label>
                 <input
                   type="date"
                   value={session.date}
                   onChange={(e) => updateSession({ date: e.target.value })}
-                  className="w-full bg-neutral-900 border border-neutral-800 text-white px-3 h-11 rounded text-sm"
+                  className="w-full bg-neutral-900 border border-neutral-800 text-white px-2 h-11 rounded text-[13px] block"
+                  style={{ minWidth: 0, maxWidth: '100%' }}
                 />
               </div>
-              <div>
+              <div className="min-w-0">
                 <label className="text-[10px] tracking-[0.2em] text-neutral-500 uppercase block mb-1" style={{ fontFamily: 'var(--font-display)' }}>Duration (min)</label>
                 <input
                   type="number"
                   inputMode="numeric"
                   value={session.durationMin}
                   onChange={(e) => updateSession({ durationMin: e.target.value })}
-                  className="w-full bg-neutral-900 border border-neutral-800 text-white px-3 h-11 rounded text-sm"
+                  className="w-full bg-neutral-900 border border-neutral-800 text-white px-2 h-11 rounded text-[13px] text-center"
+                  style={{ minWidth: 0, maxWidth: '100%' }}
                   placeholder="60"
                 />
               </div>
@@ -3043,27 +3045,36 @@ export default function App() {
               <h2 className="text-black tracking-[0.25em] text-lg font-bold" style={{ fontFamily: 'var(--font-display)' }}>
                 EXERCISES
               </h2>
-              <span className="text-black text-xs font-mono">{session.exercises.length}</span>
+              <span className="text-black text-xs font-mono">
+                {editingExistingId
+                  ? session.exercises.filter((ex) => ex.included !== false).length
+                  : session.exercises.length}
+              </span>
             </div>
             <div>
-              {session.exercises.map((ex, i) => (
-                <ExerciseRow
-                  key={i}
-                  exercise={ex}
-                  index={i}
-                  prev={previousByExercise[ex.name]}
-                  onChange={(newEx) => updateExercise(i, newEx)}
-                  onEditSet={(setIdx) => setEditingSet({ exerciseIdx: i, setIdx, warmup: false })}
-                  onEditWarmup={(setIdx) => setEditingSet({ exerciseIdx: i, setIdx, warmup: true })}
-                  onDelete={() => deleteExercise(i)}
-                  onRename={(name) => updateExercise(i, { ...ex, name })}
-                  onAddSet={() => updateExercise(i, { ...ex, sets: [...ex.sets, { reps: '', weight: '', time: '', failure: false, bw: false }] })}
-                  onRemoveSet={() => updateExercise(i, { ...ex, sets: ex.sets.slice(0, -1) })}
-                  onAddWarmup={() => addWarmup(i)}
-                  onRemoveWarmup={() => removeWarmup(i)}
-                  onToggleIncluded={() => toggleIncluded(i)}
-                />
-              ))}
+              {session.exercises.map((ex, i) => {
+                // When viewing/editing a past session from History, hide exercises that were toggled off.
+                // For fresh sessions still in progress, show everything so the user can toggle them on/off.
+                if (editingExistingId && ex.included === false) return null;
+                return (
+                  <ExerciseRow
+                    key={i}
+                    exercise={ex}
+                    index={i}
+                    prev={previousByExercise[ex.name]}
+                    onChange={(newEx) => updateExercise(i, newEx)}
+                    onEditSet={(setIdx) => setEditingSet({ exerciseIdx: i, setIdx, warmup: false })}
+                    onEditWarmup={(setIdx) => setEditingSet({ exerciseIdx: i, setIdx, warmup: true })}
+                    onDelete={() => deleteExercise(i)}
+                    onRename={(name) => updateExercise(i, { ...ex, name })}
+                    onAddSet={() => updateExercise(i, { ...ex, sets: [...ex.sets, { reps: '', weight: '', time: '', failure: false, bw: false }] })}
+                    onRemoveSet={() => updateExercise(i, { ...ex, sets: ex.sets.slice(0, -1) })}
+                    onAddWarmup={() => addWarmup(i)}
+                    onRemoveWarmup={() => removeWarmup(i)}
+                    onToggleIncluded={() => toggleIncluded(i)}
+                  />
+                );
+              })}
             </div>
             <button
               onClick={addExercise}
