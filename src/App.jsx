@@ -102,7 +102,13 @@ const storage = {
           return v ? JSON.parse(v.value) : null;
         } catch { return null; }
       }));
-      return sessions.filter(Boolean).sort((a, b) => b.id - a.id);
+      return sessions.filter(Boolean).sort((a, b) => {
+        // Sort by session date (newest first), tie-break by id desc
+        const dA = new Date(a.date || 0).getTime();
+        const dB = new Date(b.date || 0).getTime();
+        if (dB !== dA) return dB - dA;
+        return (b.id || 0) - (a.id || 0);
+      });
     } catch { return []; }
   },
   async deleteSession(id) {
@@ -681,7 +687,7 @@ const ExerciseRow = ({
         <div className="pointer-events-none absolute top-12 bottom-8 right-0 w-6" style={{ background: 'linear-gradient(to left, #000 0%, transparent 100%)' }} />
       )}
       {/* Header row - toggle on LEFT, name on right */}
-      <div className="flex items-center mb-1 pl-2 pr-2 gap-4">
+      <div className="flex items-center mb-1 pl-2 pr-2 gap-6">
         {/* Include toggle switch (iOS-style, compact) - positioned left so it is never clipped */}
         <button
           onClick={onToggleIncluded}
@@ -1031,7 +1037,12 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
         </div>
       ) : (
         <div>
-          {sessions.map((s) => {
+          {[...sessions].sort((a, b) => {
+            const dA = new Date(a.date || 0).getTime();
+            const dB = new Date(b.date || 0).getTime();
+            if (dB !== dA) return dB - dA;
+            return (b.id || 0) - (a.id || 0);
+          }).map((s) => {
             const totalSets = s.exercises.reduce((a, e) => a + e.sets.filter(x => x.reps).length, 0);
             return (
               <button
