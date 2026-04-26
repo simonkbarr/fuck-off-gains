@@ -34,10 +34,14 @@ const PROGRAMMES = {
 const DEFAULT_TEMPLATE = PROGRAMMES.anterior.exercises;
 
 const emptySets = (n) => Array.from({ length: n }, () => ({ reps: '', weight: '', time: '', failure: false, bw: false, warmup: false }));
+const emptyWarmups = (n) => Array.from({ length: n }, () => ({ reps: '', weight: '', time: '', failure: false, bw: false, warmup: true }));
 
 const emptyWarmup = () => ({ reps: '', weight: '', time: '', failure: false, bw: false, warmup: true });
 
-const createEmptySession = (template, programme = 'anterior', includedMap = null) => ({
+// Builds a fresh session. If `lastCounts` is provided (a map of exercise name -> { sets, warmups }),
+// the new session will use those counts so the layout matches the previous same-programme session
+// (e.g. "I did 4 working sets and 2 warmup sets last time, give me the same layout this time").
+const createEmptySession = (template, programme = 'anterior', includedMap = null, lastCounts = null) => ({
   id: Date.now(),
   date: new Date().toISOString().slice(0, 10),
   programme,
@@ -45,15 +49,20 @@ const createEmptySession = (template, programme = 'anterior', includedMap = null
   durationMin: '',
   whoopRecovery: '',
   whoopRelRecovery: '',
-  exercises: template.map((t) => ({
-    name: t.name,
-    unit: t.unit,
-    superset: t.superset || false,
-    // Fresh sessions always start with every exercise included. User can toggle off during workout.
-    included: true,
-    warmupSets: [],
-    sets: emptySets(t.sets),
-  })),
+  exercises: template.map((t) => {
+    const last = lastCounts?.[t.name];
+    const setCount = (last && last.sets > 0) ? last.sets : t.sets;
+    const warmupCount = last?.warmups || 0;
+    return {
+      name: t.name,
+      unit: t.unit,
+      superset: t.superset || false,
+      // Fresh sessions always start with every exercise included. User can toggle off during workout.
+      included: true,
+      warmupSets: emptyWarmups(warmupCount),
+      sets: emptySets(setCount),
+    };
+  }),
   notes: '',
   rating: '',
 });
@@ -1060,7 +1069,20 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
             if (dB !== dA) return dB - dA;
             return (b.id || 0) - (a.id || 0);
           }).map((s) => {
-            const totalSets = s.exercises.reduce((a, e) => a + e.sets.filter(x => x.reps).length, 0);
+            // Count any set with logged data: reps OR weight OR time (covers time-only exercises)
+            const totalSets = (s.exercises || []).reduce((a, e) => {
+              if (e.included === false) return a;
+              return a + (e.sets || []).filter((x) => {
+                const hasReps = x.reps !== '' && x.reps !== null && x.reps !== undefined && parseInt(x.reps) > 0;
+                const hasWeight = x.weight !== '' && x.weight !== null && x.weight !== undefined && parseFloat(x.weight) > 0;
+                const hasTime = x.time !== '' && x.time !== null && x.time !== undefined && parseFloat(x.time) > 0;
+                return hasReps || hasWeight || hasTime;
+              }).length;
+            }, 0);
+            // Resolve programme display label and force uppercase
+            const programmeLabel = s.programme
+              ? String(PROGRAMMES[s.programme]?.label || s.programme).toUpperCase()
+              : (s.muscleGroup ? String(s.muscleGroup).toUpperCase() : 'SESSION');
             return (
               <button
                 key={s.id}
@@ -1072,8 +1094,8 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
                     <div className="text-white font-semibold text-lg" style={{ fontFamily: 'var(--font-display)' }}>
                       {new Date(s.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}
                     </div>
-                    <div className="text-sm text-neutral-400">
-                      {s.programme ? (PROGRAMMES[s.programme]?.label || s.programme).toUpperCase() : (s.muscleGroup || 'Session')}
+                    <div className="text-sm text-neutral-400" style={{ textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                      {programmeLabel}
                     </div>
                   </div>
                   <button
@@ -2286,6 +2308,30 @@ export default function App() {
     return map;
   };
 
+  // Helper: build a per-exercise "last session counts" map from the most recent same-programme
+  // session. Used to inherit working-set count and warmup count so the new session's layout
+  // mirrors what was actually done last time, regardless of the static defaults.
+  const buildLastCountsMap = (sessionsList, programme) => {
+    const sorted = [...sessionsList]
+      .filter((s) => s.programme === programme)
+      .sort((a, b) => {
+        const dA = new Date(a.date || 0).getTime();
+        const dB = new Date(b.date || 0).getTime();
+        if (dB !== dA) return dB - dA;
+        return (b.id || 0) - (a.id || 0);
+      });
+    const last = sorted[0];
+    if (!last) return null;
+    const map = {};
+    (last.exercises || []).forEach((ex) => {
+      map[ex.name] = {
+        sets: (ex.sets || []).length,
+        warmups: (ex.warmupSets || []).length,
+      };
+    });
+    return map;
+  };
+
   // Helper: build a new session for a given programme, pulling in last-time's included flags
   // and any custom exercises that were part of that last session (so user's additions carry over)
   const buildSessionForProgramme = async (programme, sessionsList) => {
@@ -2293,7 +2339,8 @@ export default function App() {
     const storedTemplate = await storage.getTemplate(programme);
     const template = storedTemplate || base;
     const includedMap = buildIncludedMap(sessionsList, programme);
-    return createEmptySession(template, programme, includedMap);
+    const lastCounts = buildLastCountsMap(sessionsList, programme);
+    return createEmptySession(template, programme, includedMap, lastCounts);
   };
 
   // Load initial data
