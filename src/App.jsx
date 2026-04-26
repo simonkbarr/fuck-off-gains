@@ -34,14 +34,10 @@ const PROGRAMMES = {
 const DEFAULT_TEMPLATE = PROGRAMMES.anterior.exercises;
 
 const emptySets = (n) => Array.from({ length: n }, () => ({ reps: '', weight: '', time: '', failure: false, bw: false, warmup: false }));
-const emptyWarmups = (n) => Array.from({ length: n }, () => ({ reps: '', weight: '', time: '', failure: false, bw: false, warmup: true }));
 
 const emptyWarmup = () => ({ reps: '', weight: '', time: '', failure: false, bw: false, warmup: true });
 
-// Builds a fresh session. If `lastCounts` is provided (a map of exercise name -> { sets, warmups }),
-// the new session will use those counts so the layout matches the previous same-programme session
-// (e.g. "I did 4 working sets and 2 warmup sets last time, give me the same layout this time").
-const createEmptySession = (template, programme = 'anterior', includedMap = null, lastCounts = null) => ({
+const createEmptySession = (template, programme = 'anterior', includedMap = null) => ({
   id: Date.now(),
   date: new Date().toISOString().slice(0, 10),
   programme,
@@ -49,20 +45,15 @@ const createEmptySession = (template, programme = 'anterior', includedMap = null
   durationMin: '',
   whoopRecovery: '',
   whoopRelRecovery: '',
-  exercises: template.map((t) => {
-    const last = lastCounts?.[t.name];
-    const setCount = (last && last.sets > 0) ? last.sets : t.sets;
-    const warmupCount = last?.warmups || 0;
-    return {
-      name: t.name,
-      unit: t.unit,
-      superset: t.superset || false,
-      // Fresh sessions always start with every exercise included. User can toggle off during workout.
-      included: true,
-      warmupSets: emptyWarmups(warmupCount),
-      sets: emptySets(setCount),
-    };
-  }),
+  exercises: template.map((t) => ({
+    name: t.name,
+    unit: t.unit,
+    superset: t.superset || false,
+    // Fresh sessions always start with every exercise included. User can toggle off during workout.
+    included: true,
+    warmupSets: [],
+    sets: emptySets(t.sets),
+  })),
   notes: '',
   rating: '',
 });
@@ -124,46 +115,17 @@ const storage = {
     try { await window.storage.delete(`session:${id}`); } catch (e) { console.error(e); }
   },
   // One-time migration: clears stored programme templates AND stale draft so the current
-  // PROGRAMMES defaults + fresh-toggle logic + trimmed-trailing logic take effect cleanly.
+  // PROGRAMMES defaults + fresh-toggle logic take effect cleanly. Bumped to 4.
   async runSwapMigration() {
     try {
       const r = await window.storage.get('schema-version');
       const version = r ? Number(r.value) : 0;
-      if (version < 5) {
+      if (version < 4) {
         await window.storage.delete('template:anterior');
         await window.storage.delete('template:posterior');
         await window.storage.delete('template'); // legacy pre-programme key
-        await window.storage.delete('draft'); // clear stale draft with phantom trailing cells
-        await window.storage.set('schema-version', '5');
-      }
-      // v6: repair untagged sessions by inferring programme from their exercise list.
-      // Anterior signature exercises: Heel Raise Goblet Squat, Bicep Curl, Press Up.
-      // Posterior signature exercises: Standing Hamstring Curl, Roman Dead Lift, Tripcep Push Down Rope.
-      if (version < 6) {
-        const ANTERIOR_SIG = ['Heel Raise Goblet Squat', 'Bicep Curl', 'Press Up', 'Incline DB Chest Press', 'DB Lat Raise', 'Leg Extension', 'Ab Crunch'];
-        const POSTERIOR_SIG = ['Standing Hamstring Curl', 'Roman Dead Lift', 'Tripcep Push Down Rope', 'Lateral Pull Down (narrow/neutral)', 'Chest Supported Row (narrow)', 'Rear Flys'];
-        const all = await window.storage.list('session:');
-        const keys = all?.keys || [];
-        let repaired = 0;
-        for (const key of keys) {
-          try {
-            const v = await window.storage.get(key);
-            if (!v) continue;
-            const s = JSON.parse(v.value);
-            if (s.programme === 'anterior' || s.programme === 'posterior') continue;
-            // Untagged - infer from exercises
-            const names = (s.exercises || []).map((e) => e.name);
-            const antScore = names.filter((n) => ANTERIOR_SIG.includes(n)).length;
-            const postScore = names.filter((n) => POSTERIOR_SIG.includes(n)).length;
-            if (antScore > postScore) s.programme = 'anterior';
-            else if (postScore > antScore) s.programme = 'posterior';
-            else continue; // truly ambiguous, skip
-            await window.storage.set(key, JSON.stringify(s));
-            repaired++;
-          } catch (_) {}
-        }
-        await window.storage.set('schema-version', '6');
-        if (repaired > 0) console.log(`Repaired ${repaired} untagged session(s).`);
+        await window.storage.delete('draft'); // clear stale draft with mismatched toggles
+        await window.storage.set('schema-version', '4');
       }
     } catch (e) { console.error('Migration error:', e); }
   },
@@ -716,22 +678,6 @@ const ExerciseRow = ({
     return { value, secondary: bits.join('·') };
   };
 
-  // Build suggested values for empty WARMUP sets (from last session's same-numbered warmup)
-  const getWarmupSuggested = (setIndex) => {
-    if (!prev?.warmupSetData?.[setIndex]) return null;
-    const ps = prev.warmupSetData[setIndex];
-    const isBW = exercise.unit === 'bw' || ps.bw;
-    const hasReps = ps.reps !== '' && parseInt(ps.reps) > 0;
-    const hasWeight = !isBW && ps.weight !== '' && parseFloat(ps.weight) > 0;
-    if (!hasReps && !hasWeight && !isBW) return null;
-    // Hero value for warmup cells is reps
-    const value = hasReps ? `${ps.reps}` : '-';
-    const bits = [];
-    if (isBW) bits.push('BW');
-    else if (hasWeight) bits.push(`${ps.weight}kg`);
-    return { value, secondary: bits.join('·') };
-  };
-
   const warmupSets = exercise.warmupSets || [];
 
   return (
@@ -844,7 +790,6 @@ const ExerciseRow = ({
                   unit={exercise.unit}
                   onClick={() => onEditWarmup(i)}
                   isWarmup
-                  suggested={getWarmupSuggested(i)}
                 />
               ))}
               <div className="flex flex-col gap-1 shrink-0 justify-center">
@@ -999,31 +944,14 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
     try {
       const all = await window.storage.list();
       const sessionKeys = (all?.keys || []).filter((k) => k.startsWith('session:'));
-      const hasTemplate = (all?.keys || []).includes('template') || (all?.keys || []).includes('template:anterior') || (all?.keys || []).includes('template:posterior');
+      const hasTemplate = (all?.keys || []).includes('template');
       const hasDraft = (all?.keys || []).includes('draft');
-      // Also load every session and report date + programme so we can see which sessions exist and what they're tagged as
-      const sessionDetails = [];
-      for (const key of sessionKeys) {
-        try {
-          const v = await window.storage.get(key);
-          if (v) {
-            const s = JSON.parse(v.value);
-            sessionDetails.push({
-              date: String(s.date || '').slice(0, 10),
-              programme: s.programme || '(none)',
-              id: s.id,
-            });
-          }
-        } catch (_) {}
-      }
-      sessionDetails.sort((a, b) => (b.date > a.date ? 1 : -1));
       setDiagnostic({
         totalKeys: all?.keys?.length || 0,
         sessionKeys: sessionKeys.length,
         hasTemplate,
         hasDraft,
         allKeys: all?.keys || [],
-        sessionDetails,
       });
     } catch (e) {
       setDiagnostic({ error: e.message });
@@ -1086,19 +1014,6 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
                 <div>Session keys: <span className="text-white">{diagnostic.sessionKeys}</span></div>
                 <div>Template saved: <span className="text-white">{diagnostic.hasTemplate ? 'yes' : 'no'}</span></div>
                 <div>Draft in progress: <span className="text-white">{diagnostic.hasDraft ? 'yes' : 'no'}</span></div>
-                {diagnostic.sessionDetails && diagnostic.sessionDetails.length > 0 && (
-                  <div className="mt-2 pt-2 border-t border-neutral-900">
-                    <div className="text-neutral-400 mb-1">Sessions (newest first):</div>
-                    {diagnostic.sessionDetails.map((s, i) => (
-                      <div key={i} className="flex justify-between text-[10px]">
-                        <span className="text-white">{s.date}</span>
-                        <span className={s.programme === 'anterior' ? 'text-orange-400' : s.programme === 'posterior' ? 'text-green-400' : 'text-neutral-500'}>
-                          {s.programme}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
                 {diagnostic.allKeys.length > 0 && (
                   <details className="mt-2">
                     <summary className="cursor-pointer text-neutral-500">All keys ({diagnostic.allKeys.length})</summary>
@@ -1128,30 +1043,7 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
             if (dB !== dA) return dB - dA;
             return (b.id || 0) - (a.id || 0);
           }).map((s) => {
-            // Count working sets (those with any logged data: reps OR weight OR time).
-            // Warmup sets are excluded here and counted separately below.
-            const totalSets = (s.exercises || []).reduce((a, e) => {
-              if (e.included === false) return a;
-              return a + (e.sets || []).filter((x) => {
-                const hasReps = x.reps !== '' && x.reps !== null && x.reps !== undefined && parseInt(x.reps) > 0;
-                const hasWeight = x.weight !== '' && x.weight !== null && x.weight !== undefined && parseFloat(x.weight) > 0;
-                const hasTime = x.time !== '' && x.time !== null && x.time !== undefined && parseFloat(x.time) > 0;
-                return hasReps || hasWeight || hasTime;
-              }).length;
-            }, 0);
-            // Count warmup sets that had any logged data (reps or weight)
-            const totalWarmups = (s.exercises || []).reduce((a, e) => {
-              if (e.included === false) return a;
-              return a + (e.warmupSets || []).filter((x) => {
-                const hasReps = x.reps !== '' && x.reps !== null && x.reps !== undefined && parseInt(x.reps) > 0;
-                const hasWeight = x.weight !== '' && x.weight !== null && x.weight !== undefined && parseFloat(x.weight) > 0;
-                return hasReps || hasWeight;
-              }).length;
-            }, 0);
-            // Resolve programme display label and force uppercase
-            const programmeLabel = s.programme
-              ? String(PROGRAMMES[s.programme]?.label || s.programme).toUpperCase()
-              : (s.muscleGroup ? String(s.muscleGroup).toUpperCase() : 'SESSION');
+            const totalSets = s.exercises.reduce((a, e) => a + e.sets.filter(x => x.reps).length, 0);
             return (
               <button
                 key={s.id}
@@ -1163,8 +1055,8 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
                     <div className="text-white font-semibold text-lg" style={{ fontFamily: 'var(--font-display)' }}>
                       {new Date(s.date).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}
                     </div>
-                    <div className="text-sm text-neutral-400" style={{ textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                      {programmeLabel}
+                    <div className="text-sm text-neutral-400">
+                      {s.programme ? (PROGRAMMES[s.programme]?.label || s.programme).toUpperCase() : (s.muscleGroup || 'Session')}
                     </div>
                   </div>
                   <button
@@ -1177,7 +1069,6 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
                 <div className="flex gap-3 text-xs text-neutral-500 mt-2 font-mono">
                   {s.durationMin && <span>{s.durationMin}min</span>}
                   <span>{totalSets} sets</span>
-                  {totalWarmups > 0 && <span className="text-amber-500">{totalWarmups} w/up</span>}
                   {s.whoopRecovery && <span className="text-orange-400">Rec {s.whoopRecovery}%</span>}
                   {s.whoopRelRecovery && <span className="text-orange-400">Rel Rec {s.whoopRelRecovery}</span>}
                   {!s.whoopRelRecovery && s.whoopStrain && <span className="text-orange-400">Strain {s.whoopStrain}</span>}
@@ -1234,43 +1125,19 @@ const TimerWidget = ({ compact = false, voiceEnabled = false, onVoiceToggle, onS
     const ctx = getAudio();
     if (!ctx) return;
     try {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      osc.connect(gain);
+      gain.connect(ctx.destination);
       const now = ctx.currentTime;
       const dur = durationMs / 1000;
-      // Master gain - amplify the whole stack. Doubling perceived loudness vs old sine.
-      const master = ctx.createGain();
-      master.connect(ctx.destination);
-      // Gain envelope: snap on, hold, then exponential decay
-      master.gain.setValueAtTime(0, now);
-      master.gain.linearRampToValueAtTime(Math.min(1.0, vol * 1.8), now + 0.005);
-      master.gain.setValueAtTime(Math.min(1.0, vol * 1.8), now + Math.max(0.01, dur - 0.05));
-      master.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-      // Primary oscillator - triangle wave is louder-sounding than sine but still pleasant
-      const osc1 = ctx.createOscillator();
-      osc1.type = 'triangle';
-      osc1.frequency.value = freq;
-      const g1 = ctx.createGain();
-      g1.gain.value = 0.85;
-      osc1.connect(g1);
-      g1.connect(master);
-      // Secondary oscillator one octave up at lower volume - adds harmonic richness, perceived as louder
-      const osc2 = ctx.createOscillator();
-      osc2.type = 'sine';
-      osc2.frequency.value = freq * 2;
-      const g2 = ctx.createGain();
-      g2.gain.value = 0.35;
-      osc2.connect(g2);
-      g2.connect(master);
-      // Subtle square at fundamental for extra punch on the attack
-      const osc3 = ctx.createOscillator();
-      osc3.type = 'square';
-      osc3.frequency.value = freq;
-      const g3 = ctx.createGain();
-      g3.gain.value = 0.18;
-      osc3.connect(g3);
-      g3.connect(master);
-      osc1.start(now); osc1.stop(now + dur);
-      osc2.start(now); osc2.stop(now + dur);
-      osc3.start(now); osc3.stop(now + dur);
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(vol, now + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+      osc.start(now);
+      osc.stop(now + dur);
     } catch (e) { /* ignore */ }
   };
 
@@ -1744,46 +1611,7 @@ const TimerWidget = ({ compact = false, voiceEnabled = false, onVoiceToggle, onS
 // ============================================================
 // Custom Confirm Dialog - reliable in iOS PWAs where native confirm() can be blocked
 // ============================================================
-const ConfirmDialog = ({ title, message, confirmLabel = 'CONFIRM', cancelLabel = 'CANCEL', onConfirm, onCancel, danger = false, holdMs = 2000 }) => {
-  // Hold-to-confirm state for danger mode (e.g., overwriting historical data)
-  const [holdProgress, setHoldProgress] = useState(0);
-  const holdTimerRef = useRef(null);
-  const holdStartRef = useRef(0);
-  const completedRef = useRef(false);
-
-  const startHold = (e) => {
-    if (e && e.preventDefault) e.preventDefault();
-    if (completedRef.current) return;
-    holdStartRef.current = Date.now();
-    if (holdTimerRef.current) clearInterval(holdTimerRef.current);
-    holdTimerRef.current = setInterval(() => {
-      const pct = Math.min(100, ((Date.now() - holdStartRef.current) / holdMs) * 100);
-      setHoldProgress(pct);
-      if (pct >= 100 && !completedRef.current) {
-        completedRef.current = true;
-        clearInterval(holdTimerRef.current);
-        holdTimerRef.current = null;
-        onConfirm();
-      }
-    }, 30);
-  };
-
-  const cancelHold = () => {
-    if (completedRef.current) return;
-    if (holdTimerRef.current) {
-      clearInterval(holdTimerRef.current);
-      holdTimerRef.current = null;
-    }
-    setHoldProgress(0);
-  };
-
-  // Cleanup on unmount
-  useEffect(() => () => { if (holdTimerRef.current) clearInterval(holdTimerRef.current); }, []);
-
-  const borderColor = danger ? 'border-red-500' : 'border-orange-500';
-  const confirmBg = danger ? 'bg-red-600' : 'bg-orange-500';
-  const confirmActive = danger ? 'active:bg-red-700' : 'active:bg-orange-600';
-
+const ConfirmDialog = ({ title, message, confirmLabel = 'CONFIRM', cancelLabel = 'CANCEL', onConfirm, onCancel }) => {
   return (
     <div
       className="fixed inset-0 flex items-center justify-center p-6"
@@ -1796,19 +1624,14 @@ const ConfirmDialog = ({ title, message, confirmLabel = 'CONFIRM', cancelLabel =
       }}
     >
       <div
-        className={`border-2 ${borderColor} rounded-2xl p-5 w-full max-w-sm shadow-2xl`}
+        className="border-2 border-orange-500 rounded-2xl p-5 w-full max-w-sm shadow-2xl"
         onClick={(e) => e.stopPropagation()}
         style={{ backgroundColor: '#000000' }}
       >
         <div className="text-xl font-bold text-white mb-2 tracking-wide" style={{ fontFamily: 'var(--font-display)' }}>
           {title}
         </div>
-        {message && <div className="text-sm text-neutral-400 mb-5 whitespace-pre-line">{message}</div>}
-        {danger && (
-          <div className="mb-3 text-[11px] text-red-400 font-mono tracking-wide bg-red-950/40 border border-red-900 rounded p-2">
-            HOLD the red button for 2 seconds to overwrite the historic record. Release to cancel.
-          </div>
-        )}
+        {message && <div className="text-sm text-neutral-400 mb-5">{message}</div>}
         <div className="flex gap-3 mt-4">
           <button
             onClick={onCancel}
@@ -1817,35 +1640,13 @@ const ConfirmDialog = ({ title, message, confirmLabel = 'CONFIRM', cancelLabel =
           >
             {cancelLabel}
           </button>
-          {danger ? (
-            <button
-              onMouseDown={startHold}
-              onMouseUp={cancelHold}
-              onMouseLeave={cancelHold}
-              onTouchStart={startHold}
-              onTouchEnd={cancelHold}
-              onTouchCancel={cancelHold}
-              onContextMenu={(e) => e.preventDefault()}
-              className={`flex-1 h-12 ${confirmBg} ${confirmActive} text-white rounded-lg font-bold tracking-[0.15em] relative overflow-hidden select-none`}
-              style={{ fontFamily: 'var(--font-display)', WebkitUserSelect: 'none', userSelect: 'none', WebkitTouchCallout: 'none' }}
-            >
-              <span
-                className="absolute inset-0 bg-white/30 origin-left transition-none"
-                style={{ transform: `scaleX(${holdProgress / 100})` }}
-              />
-              <span className="relative z-10">
-                {holdProgress > 0 && holdProgress < 100 ? `${Math.round(holdProgress)}%` : confirmLabel}
-              </span>
-            </button>
-          ) : (
-            <button
-              onClick={onConfirm}
-              className={`flex-1 h-12 ${confirmBg} ${confirmActive} text-black rounded-lg font-bold tracking-[0.15em]`}
-              style={{ fontFamily: 'var(--font-display)' }}
-            >
-              {confirmLabel}
-            </button>
-          )}
+          <button
+            onClick={onConfirm}
+            className="flex-1 h-12 bg-orange-500 text-black rounded-lg font-bold tracking-[0.15em] active:bg-orange-600"
+            style={{ fontFamily: 'var(--font-display)' }}
+          >
+            {confirmLabel}
+          </button>
         </div>
       </div>
     </div>
@@ -2133,41 +1934,34 @@ const SessionSummary = ({ justSaved, previousSameProgramme, allSessions, onConti
 // Stats View - deep analytics across all sessions
 // ============================================================
 const StatsView = ({ sessions, onBack }) => {
-  const [exMetric, setExMetric] = useState('weight'); // 'weight' | 'tut'
-  const [expanded, setExpanded] = useState(new Set());
-  const toggleExpanded = (name) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name); else next.add(name);
-      return next;
-    });
-  };
-
-  // Overview totals - kept lean and relevant
+  // Overview totals
   const totals = useMemo(() => {
     const sorted = [...sessions].sort((a, b) => new Date(a.date) - new Date(b.date));
-    let totalTUT = 0, totalReps = 0, totalSets = 0;
+    let totalTUT = 0, totalVol = 0, totalReps = 0, totalSets = 0, totalMin = 0;
     sorted.forEach((s) => {
       totalTUT += sessionTUT(s);
+      totalVol += sessionVolume(s);
       totalReps += sessionTotalReps(s);
       totalSets += sessionSetCount(s);
+      totalMin += Number(s.durationMin) || 0;
     });
+    // Streak: count consecutive weeks with at least one session
     const weeks = new Set(sorted.map((s) => weekKey(s.date)).filter(Boolean));
-    return { sessions: sorted.length, totalTUT, totalReps, totalSets, weeksTrained: weeks.size };
+    return { sessions: sorted.length, totalTUT, totalVol, totalReps, totalSets, totalMin, weeksTrained: weeks.size };
   }, [sessions]);
 
-  // Programme split - count by raw programme key, treat anything else as untagged
+  // Programme split
   const programmeSplit = useMemo(() => {
-    const counts = { anterior: 0, posterior: 0, untagged: 0 };
+    const counts = { anterior: 0, posterior: 0, other: 0 };
     sessions.forEach((s) => {
-      if (s.programme === 'anterior') counts.anterior++;
-      else if (s.programme === 'posterior') counts.posterior++;
-      else counts.untagged++;
+      const p = s.programme || 'other';
+      if (counts[p] !== undefined) counts[p]++;
+      else counts.other++;
     });
     return counts;
   }, [sessions]);
 
-  // Weekly frequency last 8 weeks
+  // Weekly frequency (last 8 weeks)
   const weeklyFreq = useMemo(() => {
     const now = new Date();
     const out = [];
@@ -2181,51 +1975,28 @@ const StatsView = ({ sessions, onBack }) => {
     return out;
   }, [sessions]);
 
-  // Rating distribution
-  const ratingDist = useMemo(() => {
-    const buckets = Array.from({ length: 10 }, (_, i) => ({ label: String(i + 1), value: 0 }));
-    sessions.forEach((s) => {
-      const r = Number(s.rating);
-      if (r >= 1 && r <= 10) buckets[r - 1].value++;
-    });
-    return buckets;
-  }, [sessions]);
-
-  // Per-exercise progression - the headline data set
-  // For each exercise, builds an array of session-level stats (max weight, total TUT)
-  // chronologically, so we can plot weight progression and TUT trend.
+  // Per-exercise progression: group all sessions by exercise name, show TUT per session
   const exerciseProgression = useMemo(() => {
     const map = new Map();
     const sorted = [...sessions].sort((a, b) => new Date(a.date) - new Date(b.date));
     sorted.forEach((s) => {
       (s.exercises || []).filter((ex) => ex.included !== false).forEach((ex) => {
-        if (!map.has(ex.name)) map.set(ex.name, { unit: ex.unit, points: [] });
-        const sets = (ex.sets || []);
-        const tut = sets.reduce((sum, set) => sum + (Number(set.time) || 0), 0);
-        const maxWeight = Math.max(0, ...sets.map((st) => Number(st.weight) || 0));
-        const avgWeight = (() => {
-          const ws = sets.map((st) => Number(st.weight) || 0).filter((w) => w > 0);
-          return ws.length ? ws.reduce((a, w) => a + w, 0) / ws.length : 0;
-        })();
-        // Skip if this session had no real data for this exercise
-        if (tut === 0 && maxWeight === 0) return;
-        map.get(ex.name).points.push({
+        if (!map.has(ex.name)) map.set(ex.name, []);
+        const tut = (ex.sets || []).reduce((sum, set) => sum + (Number(set.time) || 0), 0);
+        const vol = (ex.sets || []).reduce((sum, set) => sum + (Number(set.weight) || 0) * (Number(set.reps) || 0), 0);
+        const maxWeight = Math.max(0, ...(ex.sets || []).map((s) => Number(s.weight) || 0));
+        map.get(ex.name).push({
           label: new Date(s.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }),
           tut,
+          vol,
           maxWeight,
-          avgWeight,
           date: s.date,
-          programme: s.programme,
         });
       });
     });
-    // Return ordered: bodyweight last, then by number of sessions desc
     return Array.from(map.entries())
-      .filter(([, v]) => v.points.length >= 1)
-      .sort((a, b) => {
-        if ((a[1].unit === 'bw') !== (b[1].unit === 'bw')) return a[1].unit === 'bw' ? 1 : -1;
-        return b[1].points.length - a[1].points.length;
-      });
+      .filter(([, arr]) => arr.length >= 1)
+      .sort((a, b) => b[1].length - a[1].length);
   }, [sessions]);
 
   // Personal bests across all exercises
@@ -2255,6 +2026,26 @@ const StatsView = ({ sessions, onBack }) => {
       .map((s) => ({ x: Number(s.whoopRecovery), y: sessionTUT(s) }));
   }, [sessions]);
 
+  // Rating distribution
+  const ratingDist = useMemo(() => {
+    const buckets = Array.from({ length: 10 }, (_, i) => ({ label: String(i + 1), value: 0 }));
+    sessions.forEach((s) => {
+      const r = Number(s.rating);
+      if (r >= 1 && r <= 10) buckets[r - 1].value++;
+    });
+    return buckets;
+  }, [sessions]);
+
+  const [expanded, setExpanded] = useState(new Set());
+  const toggleExpanded = (name) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  };
+  const [exMetric, setExMetric] = useState('tut'); // 'tut' | 'vol' | 'weight'
+
   if (sessions.length === 0) {
     return (
       <div className="min-h-screen bg-black text-white p-5">
@@ -2282,143 +2073,21 @@ const StatsView = ({ sessions, onBack }) => {
         </button>
         <div>
           <h1 className="text-xl tracking-widest leading-none" style={{ fontFamily: 'var(--font-display)' }}>STATS</h1>
-          <div className="text-[9px] tracking-widest text-neutral-500 mt-0.5">{totals.sessions} session{totals.sessions === 1 ? '' : 's'} · {totals.weeksTrained} week{totals.weeksTrained === 1 ? '' : 's'} trained</div>
+          <div className="text-[9px] tracking-widest text-neutral-500 mt-0.5">{totals.sessions} sessions · {totals.weeksTrained} weeks trained</div>
         </div>
       </div>
 
       <div className="p-4 space-y-5 max-w-md mx-auto">
-
-        {/* ============================================== */}
-        {/* HEADLINE: Per-exercise progression - the No.1 stat */}
-        {/* ============================================== */}
-        {exerciseProgression.length > 0 && (
-          <section>
-            <SectionTitle icon={<TrendingUp className="w-3.5 h-3.5" />}>EXERCISE PROGRESSION</SectionTitle>
-            <div className="text-[10px] text-neutral-500 mb-3 font-mono leading-relaxed">
-              Tap an exercise for its full chart. Toggle WEIGHT vs TIME UNDER TENSION to switch view.
-            </div>
-            {/* Metric toggle - only weight and TUT (the two metrics that matter) */}
-            <div className="flex gap-1 mb-3 bg-neutral-900 p-1 rounded-lg">
-              {[{ k: 'weight', label: 'WEIGHT' }, { k: 'tut', label: 'TIME UNDER TENSION' }].map((m) => (
-                <button
-                  key={m.k}
-                  onClick={() => setExMetric(m.k)}
-                  className={`flex-1 h-9 rounded-md text-[10px] tracking-widest font-bold ${exMetric === m.k ? 'bg-orange-500 text-black' : 'text-neutral-400'}`}
-                  style={{ fontFamily: 'var(--font-display)' }}
-                >
-                  {m.label}
-                </button>
-              ))}
-            </div>
-            <div className="space-y-2">
-              {exerciseProgression.map(([name, data]) => {
-                const isOpen = expanded.has(name);
-                const points = data.points;
-                const isBW = data.unit === 'bw';
-                const metricKey = exMetric === 'tut' ? 'tut' : 'maxWeight';
-                const unit = exMetric === 'tut' ? 's' : 'kg';
-                // Skip weight progression for bodyweight exercises (always 0)
-                if (exMetric === 'weight' && isBW) {
-                  return (
-                    <div key={name} className="bg-neutral-950 border border-neutral-800 rounded-xl p-3 opacity-50">
-                      <div className="text-sm font-semibold text-white truncate">{name}</div>
-                      <div className="text-[10px] text-neutral-600 font-mono mt-0.5">Bodyweight exercise · no weight progression</div>
-                    </div>
-                  );
-                }
-                const latest = points[points.length - 1];
-                const first = points[0];
-                const chartData = points.map((p) => ({ label: p.label, value: p[metricKey] }));
-                const deltaVal = points.length >= 2 ? latest[metricKey] - first[metricKey] : 0;
-                const sessionsCount = points.length;
-                return (
-                  <div key={name} className="bg-neutral-950 border border-neutral-800 rounded-xl overflow-hidden">
-                    <button onClick={() => toggleExpanded(name)} className="w-full p-3 flex items-center justify-between text-left active:bg-neutral-900">
-                      <div className="min-w-0 flex-1 pr-2">
-                        <div className="text-sm font-semibold text-white truncate">{name}</div>
-                        <div className="text-[10px] text-neutral-500 font-mono mt-0.5">
-                          {sessionsCount} session{sessionsCount === 1 ? '' : 's'} · latest <span className="text-orange-400 font-bold">{latest[metricKey]}{unit}</span>
-                          {sessionsCount >= 2 && first[metricKey] > 0 && <span> · started {first[metricKey]}{unit}</span>}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0">
-                        {sessionsCount >= 2 && (
-                          <span className={`text-[11px] font-mono font-bold ${deltaVal > 0 ? 'text-green-400' : deltaVal < 0 ? 'text-orange-400' : 'text-neutral-500'}`}>
-                            {deltaVal > 0 ? '↑' : deltaVal < 0 ? '↓' : '='}{Math.abs(Math.round(deltaVal))}{unit}
-                          </span>
-                        )}
-                        <span className="text-neutral-600 text-xs">{isOpen ? '▲' : '▼'}</span>
-                      </div>
-                    </button>
-                    {isOpen && (
-                      <div className="border-t border-neutral-900 p-3">
-                        {sessionsCount >= 2 ? (
-                          <LineChart data={chartData} height={120} unit={unit} />
-                        ) : (
-                          <div className="text-center py-3">
-                            <div className="text-2xl font-mono font-bold text-orange-400">{latest[metricKey]}{unit}</div>
-                            <div className="text-[9px] text-neutral-600 tracking-widest mt-1">Log another session to see a trend</div>
-                          </div>
-                        )}
-                        {/* Sessions table mini-summary - max weight & TUT side-by-side */}
-                        {sessionsCount >= 2 && (
-                          <div className="mt-3 pt-3 border-t border-neutral-900 grid grid-cols-2 gap-2 text-[10px] font-mono">
-                            <div className="bg-neutral-900 rounded p-2">
-                              <div className="text-neutral-500 text-[9px] tracking-widest">PEAK WEIGHT</div>
-                              <div className="text-amber-400 font-bold text-sm mt-0.5">{Math.max(...points.map(p => p.maxWeight))}kg</div>
-                            </div>
-                            <div className="bg-neutral-900 rounded p-2">
-                              <div className="text-neutral-500 text-[9px] tracking-widest">PEAK TUT (sess.)</div>
-                              <div className="text-sky-400 font-bold text-sm mt-0.5">{Math.max(...points.map(p => p.tut))}s</div>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        )}
-
-        {/* Personal bests - kept just below progression */}
-        {personalBests.length > 0 && (
-          <section>
-            <SectionTitle icon={<Trophy className="w-3.5 h-3.5" />}>PERSONAL BESTS</SectionTitle>
-            <div className="bg-neutral-950 border border-neutral-800 rounded-xl overflow-hidden divide-y divide-neutral-900">
-              {personalBests.map(([name, best]) => (
-                <div key={name} className="p-3">
-                  <div className="text-sm font-semibold text-white mb-1.5 truncate">{name}</div>
-                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-mono">
-                    {best.weight.val > 0 && best.unit !== 'bw' && (
-                      <span className="text-amber-400">MAX {best.weight.val}kg<span className="text-neutral-600"> · {new Date(best.weight.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
-                    )}
-                    {best.time.val > 0 && (
-                      <span className="text-sky-400">TUT {best.time.val}s<span className="text-neutral-600"> · {new Date(best.time.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
-                    )}
-                    {best.reps.val > 0 && best.unit === 'bw' && (
-                      <span className="text-green-400">REPS {best.reps.val}<span className="text-neutral-600"> · {new Date(best.reps.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-        )}
-
-        {/* ============================================== */}
-        {/* SECONDARY: Activity overview, split, freq, rating */}
-        {/* ============================================== */}
-
-        {/* Activity overview - relevant counters only */}
+        {/* Overview banner */}
         <section>
-          <SectionTitle icon={<Target className="w-3.5 h-3.5" />}>ACTIVITY OVERVIEW</SectionTitle>
+          <SectionTitle icon={<Target className="w-3.5 h-3.5" />}>ALL TIME</SectionTitle>
           <div className="grid grid-cols-2 gap-2.5">
             <MetricCard label="Sessions" value={totals.sessions} />
+            <MetricCard label="Hours in Gym" value={(totals.totalMin / 60).toFixed(1)} />
             <MetricCard label="Total TUT" value={`${Math.round(totals.totalTUT / 60)}`} subunit="min" />
-            <MetricCard label="Working Sets" value={totals.totalSets} />
-            <MetricCard label="Weeks Trained" value={totals.weeksTrained} />
+            <MetricCard label="Total Volume" value={`${Math.round(totals.totalVol).toLocaleString()}`} subunit="kg·r" />
+            <MetricCard label="Total Sets" value={totals.totalSets} />
+            <MetricCard label="Total Reps" value={totals.totalReps} />
           </div>
         </section>
 
@@ -2427,28 +2096,23 @@ const StatsView = ({ sessions, onBack }) => {
           <SectionTitle icon={<Dumbbell className="w-3.5 h-3.5" />}>PROGRAMME SPLIT</SectionTitle>
           <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-4">
             {(() => {
-              const total = programmeSplit.anterior + programmeSplit.posterior + programmeSplit.untagged;
+              const total = programmeSplit.anterior + programmeSplit.posterior + programmeSplit.other;
               if (total === 0) return <div className="text-xs text-neutral-600 text-center py-2">No programme data</div>;
               const antPct = (programmeSplit.anterior / total) * 100;
               const postPct = (programmeSplit.posterior / total) * 100;
-              const untaggedPct = (programmeSplit.untagged / total) * 100;
+              const otherPct = (programmeSplit.other / total) * 100;
               return (
                 <>
                   <div className="flex h-8 rounded overflow-hidden mb-3">
                     {antPct > 0 && <div style={{ width: `${antPct}%` }} className="bg-orange-500 flex items-center justify-center text-[10px] text-black font-bold">{programmeSplit.anterior}</div>}
                     {postPct > 0 && <div style={{ width: `${postPct}%` }} className="bg-green-500 flex items-center justify-center text-[10px] text-black font-bold">{programmeSplit.posterior}</div>}
-                    {untaggedPct > 0 && <div style={{ width: `${untaggedPct}%` }} className="bg-neutral-700 flex items-center justify-center text-[10px] text-black font-bold">{programmeSplit.untagged}</div>}
+                    {otherPct > 0 && <div style={{ width: `${otherPct}%` }} className="bg-neutral-600 flex items-center justify-center text-[10px] text-black font-bold">{programmeSplit.other}</div>}
                   </div>
-                  <div className="flex items-center justify-between text-[10px] tracking-widest font-mono flex-wrap gap-y-1">
+                  <div className="flex items-center justify-between text-[10px] tracking-widest font-mono">
                     <span className="text-orange-400">ANTERIOR {antPct.toFixed(0)}%</span>
                     <span className="text-green-400">POSTERIOR {postPct.toFixed(0)}%</span>
-                    {programmeSplit.untagged > 0 && <span className="text-neutral-500">UNTAGGED {untaggedPct.toFixed(0)}%</span>}
+                    {programmeSplit.other > 0 && <span className="text-neutral-500">OTHER {otherPct.toFixed(0)}%</span>}
                   </div>
-                  {programmeSplit.untagged > 0 && (
-                    <div className="mt-3 pt-3 border-t border-neutral-900 text-[10px] text-neutral-500 leading-relaxed">
-                      <span className="text-amber-500 font-bold">{programmeSplit.untagged}</span> session{programmeSplit.untagged === 1 ? '' : 's'} not tagged. Open from History and use the programme selector to assign one.
-                    </div>
-                  )}
                 </>
               );
             })()}
@@ -2473,13 +2137,93 @@ const StatsView = ({ sessions, onBack }) => {
           </section>
         )}
 
-        {/* WHOOP recovery vs performance (TUT) scatter */}
+        {/* WHOOP Recovery vs TUT scatter */}
         {recoveryScatter.length >= 2 && (
           <section>
             <SectionTitle icon={<Zap className="w-3.5 h-3.5" />}>RECOVERY vs PERFORMANCE</SectionTitle>
             <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-3">
               <ScatterPlot data={recoveryScatter} height={160} xLabel="Recovery %" yLabel="Session TUT" />
               <div className="text-[9px] text-neutral-500 mt-1 text-center tracking-widest font-mono">{recoveryScatter.length} data points</div>
+            </div>
+          </section>
+        )}
+
+        {/* Per-exercise progression */}
+        {exerciseProgression.length > 0 && (
+          <section>
+            <div className="flex items-center justify-between mb-2">
+              <SectionTitle icon={<TrendingUp className="w-3.5 h-3.5" />} mb="mb-0">EXERCISE PROGRESSION</SectionTitle>
+            </div>
+            <div className="flex gap-1 mb-3 bg-neutral-900 p-1 rounded-lg">
+              {['tut', 'vol', 'weight'].map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setExMetric(m)}
+                  className={`flex-1 h-8 rounded-md text-[10px] tracking-widest font-bold ${exMetric === m ? 'bg-orange-500 text-black' : 'text-neutral-400'}`}
+                  style={{ fontFamily: 'var(--font-display)' }}
+                >
+                  {m === 'tut' ? 'TIME' : m === 'vol' ? 'VOLUME' : 'WEIGHT'}
+                </button>
+              ))}
+            </div>
+            <div className="space-y-2">
+              {exerciseProgression.map(([name, arr]) => {
+                const isOpen = expanded.has(name);
+                const latest = arr[arr.length - 1];
+                const first = arr[0];
+                const metricKey = exMetric === 'tut' ? 'tut' : exMetric === 'vol' ? 'vol' : 'maxWeight';
+                const unit = exMetric === 'tut' ? 's' : exMetric === 'vol' ? '' : 'kg';
+                const chartData = arr.map((a) => ({ label: a.label, value: a[metricKey] }));
+                const deltaVal = arr.length >= 2 ? latest[metricKey] - first[metricKey] : 0;
+                return (
+                  <div key={name} className="bg-neutral-950 border border-neutral-800 rounded-xl overflow-hidden">
+                    <button onClick={() => toggleExpanded(name)} className="w-full p-3 flex items-center justify-between text-left active:bg-neutral-900">
+                      <div className="min-w-0 flex-1 pr-2">
+                        <div className="text-sm font-semibold text-white truncate">{name}</div>
+                        <div className="text-[10px] text-neutral-500 font-mono mt-0.5">{arr.length} session{arr.length === 1 ? '' : 's'} · latest {latest[metricKey]}{unit}</div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {arr.length >= 2 && (
+                          <span className={`text-[11px] font-mono font-bold ${deltaVal > 0 ? 'text-green-400' : deltaVal < 0 ? 'text-orange-400' : 'text-neutral-500'}`}>
+                            {deltaVal > 0 ? '↑' : deltaVal < 0 ? '↓' : '='}{Math.abs(Math.round(deltaVal))}{unit}
+                          </span>
+                        )}
+                        <span className="text-neutral-600 text-xs">{isOpen ? '▲' : '▼'}</span>
+                      </div>
+                    </button>
+                    {isOpen && (
+                      <div className="border-t border-neutral-900 p-3">
+                        <LineChart data={chartData} height={110} unit={unit} />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* Personal bests */}
+        {personalBests.length > 0 && (
+          <section>
+            <SectionTitle icon={<Trophy className="w-3.5 h-3.5" />}>PERSONAL BESTS</SectionTitle>
+            <div className="bg-neutral-950 border border-neutral-800 rounded-xl overflow-hidden divide-y divide-neutral-900">
+              {personalBests.map(([name, best]) => (
+                <div key={name} className="p-3">
+                  <div className="text-sm font-semibold text-white mb-1.5 truncate">{name}</div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-mono">
+                    {best.weight.val > 0 && best.unit !== 'bw' && (
+                      <span className="text-amber-400">MAX {best.weight.val}kg<span className="text-neutral-600"> · {new Date(best.weight.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
+                    )}
+                    {best.time.val > 0 && (
+                      <span className="text-sky-400">TUT {best.time.val}s<span className="text-neutral-600"> · {new Date(best.time.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
+                    )}
+                    {best.reps.val > 0 && best.unit === 'bw' && (
+                      <span className="text-green-400">REPS {best.reps.val}<span className="text-neutral-600"> · {new Date(best.reps.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           </section>
         )}
@@ -2525,42 +2269,6 @@ export default function App() {
     return map;
   };
 
-  // Helper: build a per-exercise "last session counts" map from the most recent same-programme
-  // session. Used to inherit working-set count and warmup count so the new session's layout
-  // mirrors what was actually done last time, regardless of the static defaults.
-  const buildLastCountsMap = (sessionsList, programme) => {
-    const sorted = [...sessionsList]
-      .filter((s) => s.programme === programme)
-      .sort((a, b) => {
-        // Compare normalised date strings (YYYY-MM-DD) for max reliability
-        const dateA = String(a.date || '').slice(0, 10);
-        const dateB = String(b.date || '').slice(0, 10);
-        if (dateB !== dateA) return dateB > dateA ? 1 : -1;
-        return (Number(b.id) || 0) - (Number(a.id) || 0);
-      });
-    const last = sorted[0];
-    if (!last) return null;
-    const map = {};
-    // Count only sets that had real data logged. Empty trailing sets in the prior
-    // session must NOT propagate into the new session, otherwise we get cells
-    // with no suggested values dangling at the end.
-    const hasData = (st) => {
-      const r = parseInt(st.reps);
-      const w = parseFloat(st.weight);
-      const t = parseFloat(st.time);
-      return (st.bw === true) || (st.failure === true) || (Number.isFinite(r) && r > 0) || (Number.isFinite(w) && w > 0) || (Number.isFinite(t) && t > 0);
-    };
-    (last.exercises || []).forEach((ex) => {
-      const setsLogged = (ex.sets || []).filter(hasData).length;
-      const warmupsLogged = (ex.warmupSets || []).filter(hasData).length;
-      map[ex.name] = {
-        sets: setsLogged,
-        warmups: warmupsLogged,
-      };
-    });
-    return map;
-  };
-
   // Helper: build a new session for a given programme, pulling in last-time's included flags
   // and any custom exercises that were part of that last session (so user's additions carry over)
   const buildSessionForProgramme = async (programme, sessionsList) => {
@@ -2568,8 +2276,7 @@ export default function App() {
     const storedTemplate = await storage.getTemplate(programme);
     const template = storedTemplate || base;
     const includedMap = buildIncludedMap(sessionsList, programme);
-    const lastCounts = buildLastCountsMap(sessionsList, programme);
-    return createEmptySession(template, programme, includedMap, lastCounts);
+    return createEmptySession(template, programme, includedMap);
   };
 
   // Load initial data
@@ -2593,62 +2300,6 @@ export default function App() {
     })();
   }, []);
 
-  // App-wide Screen Wake Lock - keeps the phone awake any time the app is open and visible.
-  // iOS Safari supports this from 16.4+ in tabs and from 18.4+ in installed home-screen PWAs.
-  // The OS auto-releases the lock if the user backgrounds the app, locks the phone, or the
-  // tab is hidden, so we re-acquire on every visibility change back to "visible".
-  useEffect(() => {
-    let wakeLock = null;
-    let cancelled = false;
-
-    const acquire = async () => {
-      if (cancelled) return;
-      if (typeof navigator === 'undefined' || !('wakeLock' in navigator)) return;
-      if (document.visibilityState !== 'visible') return;
-      try {
-        wakeLock = await navigator.wakeLock.request('screen');
-        // If the OS releases the lock for any reason while we're still visible,
-        // try to take it again immediately so the screen stays on.
-        wakeLock.addEventListener('release', () => {
-          wakeLock = null;
-          if (!cancelled && document.visibilityState === 'visible') {
-            // Slight defer to avoid tight loops on a system-imposed release
-            setTimeout(acquire, 250);
-          }
-        });
-      } catch (e) {
-        // Common rejections: low battery, OS power-saving, no support. Silently ignore.
-      }
-    };
-
-    const release = () => {
-      if (wakeLock) {
-        try { wakeLock.release(); } catch (_) {}
-        wakeLock = null;
-      }
-    };
-
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        acquire();
-      } else {
-        release();
-      }
-    };
-
-    document.addEventListener('visibilitychange', onVisibility);
-    // Some browsers also need pageshow when restoring from bfcache
-    window.addEventListener('pageshow', onVisibility);
-    acquire();
-
-    return () => {
-      cancelled = true;
-      document.removeEventListener('visibilitychange', onVisibility);
-      window.removeEventListener('pageshow', onVisibility);
-      release();
-    };
-  }, []);
-
   // Auto-save draft (skip when editing a past session so we don't overwrite the live draft)
   useEffect(() => {
     if (session && !loading && !editingExistingId) {
@@ -2664,18 +2315,15 @@ export default function App() {
   const previousByExercise = useMemo(() => {
     const map = {};
     const currentProgramme = session?.programme;
-    // Only exclude the loaded session if we're actively editing an existing one. For fresh
-    // drafts we never exclude (drafts shouldn't accidentally hide saved data even if their ids collide).
-    const excludeId = editingExistingId || null;
-    // Filter to same-programme sessions, sort newest first by date string (YYYY-MM-DD lexicographic works)
+    // Filter to same-programme sessions, exclude the currently-loaded one, sort newest first
     const pool = sessions
-      .filter((s) => !excludeId || s.id !== excludeId)
+      .filter((s) => s.id !== session?.id)
       .filter((s) => !currentProgramme || s.programme === currentProgramme)
       .sort((a, b) => {
-        const dateA = String(a.date || '').slice(0, 10);
-        const dateB = String(b.date || '').slice(0, 10);
-        if (dateB !== dateA) return dateB > dateA ? 1 : -1;
-        return (Number(b.id) || 0) - (Number(a.id) || 0);
+        const dA = new Date(a.date).getTime();
+        const dB = new Date(b.date).getTime();
+        if (dB !== dA) return dB - dA; // newer first
+        return (b.id || 0) - (a.id || 0); // tie-break by id
       });
     for (const s of pool) {
       for (const ex of s.exercises || []) {
@@ -2690,46 +2338,24 @@ export default function App() {
         const withWeight = workingSets.filter((st) => !isBW && !st.bw && st.weight !== '');
         // Only record if this session actually had data logged for this exercise
         if (withTime.length === 0 && withReps.length === 0 && withWeight.length === 0) continue;
-        // Trim trailing empty sets so the new session does not inherit phantom blank cells
-        const setHasData = (st) => {
-          const r = parseInt(st.reps);
-          const w = parseFloat(st.weight);
-          const t = parseFloat(st.time);
-          return (st.bw === true) || (st.failure === true) || (Number.isFinite(r) && r > 0) || (Number.isFinite(w) && w > 0) || (Number.isFinite(t) && t > 0);
-        };
-        const trimTrailing = (arr) => {
-          let end = arr.length;
-          while (end > 0 && !setHasData(arr[end - 1])) end--;
-          return arr.slice(0, end);
-        };
-        const trimmedWorking = trimTrailing(workingSets);
-        const trimmedWarmups = trimTrailing(ex.warmupSets || []);
-        const map_entry = {
+        map[ex.name] = {
           date: s.date,
           avgTime: withTime.length > 0 ? withTime.reduce((a, st) => a + parseFloat(st.time), 0) / withTime.length : null,
           avgWeight: withWeight.length > 0 ? withWeight.reduce((a, st) => a + parseFloat(st.weight), 0) / withWeight.length : null,
           totalReps: withReps.length > 0 ? withReps.reduce((a, st) => a + parseInt(st.reps), 0) : null,
-          sets: trimmedWorking.length,
-          setData: trimmedWorking.map((st) => ({
+          sets: workingSets.length,
+          setData: workingSets.map((st) => ({
             time: st.time,
             weight: st.weight,
             reps: st.reps,
             bw: st.bw,
             failure: st.failure,
           })),
-          // Warmup data from the same exercise on that prior session, kept separately.
-          // Used to pre-fill suggested reps/weight on warmup cells of new sessions.
-          warmupSetData: trimmedWarmups.map((st) => ({
-            weight: st.weight,
-            reps: st.reps,
-            bw: st.bw,
-          })),
         };
-        map[ex.name] = map_entry;
       }
     }
     return map;
-  }, [sessions, editingExistingId, session?.programme]);
+  }, [sessions, session?.id, session?.programme]);
 
   const updateSession = (patch) => setSession((s) => ({ ...s, ...patch }));
 
@@ -2784,9 +2410,7 @@ export default function App() {
     // Stamp id/date if missing so summary/detectPRs can identify it
     const toSave = { ...session };
     if (!toSave.id) toSave.id = `s_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    if (!toSave.date) toSave.date = new Date().toISOString().slice(0, 10);
-    // Normalise existing dates to YYYY-MM-DD so all sessions sort consistently regardless of when they were saved
-    if (toSave.date && toSave.date.length > 10) toSave.date = toSave.date.slice(0, 10);
+    if (!toSave.date) toSave.date = new Date().toISOString();
     await storage.saveSession(toSave);
     const all = await storage.listSessions();
     setSessions(all);
@@ -2867,23 +2491,15 @@ export default function App() {
   };
 
   const switchProgramme = async (newProgramme) => {
+    // Tapping the same programme: offer a fresh reset in case state is stale
     if (newProgramme === session?.programme) {
-      // Tapping the same programme: in edit mode do nothing, otherwise offer a fresh reset
-      if (editingExistingId) return;
       if (!confirm(`Reset ${PROGRAMMES[newProgramme].label} day to a fresh session? Current unsaved data will be lost.`)) return;
       await storage.clearDraft();
       const next = await buildSessionForProgramme(newProgramme, sessions);
       setSession(next);
       return;
     }
-    // EDIT MODE: just re-tag the session's programme, never touch the exercise list.
-    // This is how you fix a past session that was logged under the wrong programme.
-    if (editingExistingId) {
-      if (!confirm(`Re-tag this session as ${PROGRAMMES[newProgramme].label}?\n\nExercise data will be kept exactly as logged. You must tap SAVE CHANGES at the bottom to make this stick.`)) return;
-      setSession((s) => ({ ...s, programme: newProgramme }));
-      return;
-    }
-    // NEW SESSION: replacing the exercise list is the right behaviour
+    // Check if current session has any logged data
     const hasData = session?.exercises?.some((ex) =>
       ex.sets?.some((s) => s.reps || s.weight || s.time) ||
       (ex.warmupSets || []).some((s) => s.reps || s.weight)
@@ -2942,13 +2558,10 @@ export default function App() {
       {showConfetti && <ConfettiOverlay />}
       {showSaveConfirm && (
         <ConfirmDialog
-          title={editingExistingId ? 'Overwrite past session?' : 'Ready to save?'}
-          message={editingExistingId
-            ? 'You are about to permanently change a previously saved session.\n\nHold the red button to confirm. Release to cancel.'
-            : 'This will file the current session and reset for the next workout.'}
-          confirmLabel={editingExistingId ? 'HOLD TO OVERWRITE' : 'SAVE'}
+          title={editingExistingId ? 'Save changes?' : 'Ready to save?'}
+          message={editingExistingId ? 'This will overwrite the original session record.' : 'This will file the current session and reset for the next workout.'}
+          confirmLabel={editingExistingId ? 'SAVE' : 'SAVE'}
           cancelLabel={editingExistingId ? 'BACK' : 'KEEP GOING'}
-          danger={!!editingExistingId}
           onConfirm={saveCurrentSession}
           onCancel={() => setShowSaveConfirm(false)}
         />
@@ -2975,37 +2588,18 @@ export default function App() {
           }}
         />
       ) : (
-        <div className="min-h-screen bg-black pb-40 overflow-x-hidden" style={{ fontFamily: 'var(--font-body)' }}>
+        <div className="min-h-screen bg-black pb-52 overflow-x-hidden" style={{ fontFamily: 'var(--font-body)' }}>
           {/* Header */}
-          <div className="bg-black border-b-4 border-white px-3 py-3 flex items-center justify-between sticky top-0 z-10 gap-2">
-            <div className="flex items-center gap-2 min-w-0 shrink">
-              <div className="w-8 h-8 bg-orange-500 flex items-center justify-center rounded shrink-0">
+          <div className="bg-black border-b-4 border-white px-4 py-3 flex items-center justify-between sticky top-0 z-10">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 bg-orange-500 flex items-center justify-center rounded">
                 <Dumbbell className="w-5 h-5 text-black" />
               </div>
-              <h1 className="text-base text-white tracking-widest leading-none truncate" style={{ fontFamily: 'var(--font-display)' }}>
-                FUCK OFF<br/><span className="text-orange-500 text-[10px] tracking-[0.3em]">GAINS TRACKER</span>
+              <h1 className="text-xl text-white tracking-widest leading-none" style={{ fontFamily: 'var(--font-display)' }}>
+                FUCK OFF<br/><span className="text-orange-500 text-sm tracking-[0.3em]">GAINS TRACKER</span>
               </h1>
             </div>
-            <div className="flex gap-1.5 shrink-0">
-              <button
-                onClick={() => setShowSaveConfirm(true)}
-                className={`h-10 px-3 rounded flex items-center justify-center gap-1.5 active:opacity-80 transition-colors ${
-                  savedFlash ? 'bg-green-500 text-black' :
-                  editingExistingId ? 'bg-amber-500 text-black' :
-                  'bg-white text-black'
-                }`}
-                style={{ fontFamily: 'var(--font-display)' }}
-                aria-label={editingExistingId ? 'Save changes' : 'Save session'}
-              >
-                {savedFlash ? (
-                  <Check className="w-4 h-4" />
-                ) : (
-                  <>
-                    <Save className="w-4 h-4" />
-                    <span className="text-[10px] font-bold tracking-widest">SAVE</span>
-                  </>
-                )}
-              </button>
+            <div className="flex gap-2">
               <button onClick={() => setView('stats')} className="w-10 h-10 bg-neutral-900 border border-neutral-800 rounded flex items-center justify-center active:bg-neutral-800" aria-label="Stats">
                 <BarChart3 className="w-5 h-5 text-neutral-300" />
               </button>
@@ -3042,43 +2636,24 @@ export default function App() {
 
           {/* Session Meta: Date, Muscle Group, Duration, WHOOP */}
           <div className="px-4 pt-4 space-y-3">
-            <div className="flex gap-3">
-              <div className="flex-1 min-w-0">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
                 <label className="text-[10px] tracking-[0.2em] text-neutral-500 uppercase block mb-1" style={{ fontFamily: 'var(--font-display)' }}>Date</label>
                 <input
                   type="date"
                   value={session.date}
                   onChange={(e) => updateSession({ date: e.target.value })}
-                  className="fogt-date-input w-full bg-neutral-900 border border-neutral-800 text-white px-2 h-11 rounded text-[13px] block"
-                  style={{
-                    minWidth: 0,
-                    maxWidth: '100%',
-                    WebkitAppearance: 'none',
-                    appearance: 'none',
-                    textAlign: 'left',
-                    textAlignLast: 'left',
-                    lineHeight: '44px',
-                    fontVariantNumeric: 'tabular-nums',
-                    direction: 'ltr',
-                  }}
+                  className="w-full bg-neutral-900 border border-neutral-800 text-white px-3 h-11 rounded text-sm"
                 />
-                {/* iOS Safari overrides text-align inside the date input via pseudo-elements; pin them with scoped CSS. */}
-                <style>{`
-                  .fogt-date-input { text-align: left !important; text-align-last: left !important; }
-                  .fogt-date-input::-webkit-date-and-time-value { text-align: left !important; padding-left: 0 !important; margin: 0 !important; min-height: 1em; }
-                  .fogt-date-input::-webkit-datetime-edit { text-align: left !important; padding: 0 !important; }
-                  .fogt-date-input::-webkit-datetime-edit-fields-wrapper { padding: 0 !important; }
-                `}</style>
               </div>
-              <div className="shrink-0" style={{ width: '90px' }}>
-                <label className="text-[10px] tracking-[0.2em] text-neutral-500 uppercase block mb-1" style={{ fontFamily: 'var(--font-display)' }}>Duration</label>
+              <div>
+                <label className="text-[10px] tracking-[0.2em] text-neutral-500 uppercase block mb-1" style={{ fontFamily: 'var(--font-display)' }}>Duration (min)</label>
                 <input
                   type="number"
                   inputMode="numeric"
                   value={session.durationMin}
                   onChange={(e) => updateSession({ durationMin: e.target.value })}
-                  className="w-full bg-neutral-900 border border-neutral-800 text-white px-2 h-11 rounded text-[13px] text-center"
-                  style={{ minWidth: 0 }}
+                  className="w-full bg-neutral-900 border border-neutral-800 text-white px-3 h-11 rounded text-sm"
                   placeholder="60"
                 />
               </div>
@@ -3150,36 +2725,27 @@ export default function App() {
               <h2 className="text-black tracking-[0.25em] text-lg font-bold" style={{ fontFamily: 'var(--font-display)' }}>
                 EXERCISES
               </h2>
-              <span className="text-black text-xs font-mono">
-                {editingExistingId
-                  ? session.exercises.filter((ex) => ex.included !== false).length
-                  : session.exercises.length}
-              </span>
+              <span className="text-black text-xs font-mono">{session.exercises.length}</span>
             </div>
             <div>
-              {session.exercises.map((ex, i) => {
-                // When viewing/editing a past session from History, hide exercises that were toggled off.
-                // For fresh sessions still in progress, show everything so the user can toggle them on/off.
-                if (editingExistingId && ex.included === false) return null;
-                return (
-                  <ExerciseRow
-                    key={i}
-                    exercise={ex}
-                    index={i}
-                    prev={previousByExercise[ex.name]}
-                    onChange={(newEx) => updateExercise(i, newEx)}
-                    onEditSet={(setIdx) => setEditingSet({ exerciseIdx: i, setIdx, warmup: false })}
-                    onEditWarmup={(setIdx) => setEditingSet({ exerciseIdx: i, setIdx, warmup: true })}
-                    onDelete={() => deleteExercise(i)}
-                    onRename={(name) => updateExercise(i, { ...ex, name })}
-                    onAddSet={() => updateExercise(i, { ...ex, sets: [...ex.sets, { reps: '', weight: '', time: '', failure: false, bw: false }] })}
-                    onRemoveSet={() => updateExercise(i, { ...ex, sets: ex.sets.slice(0, -1) })}
-                    onAddWarmup={() => addWarmup(i)}
-                    onRemoveWarmup={() => removeWarmup(i)}
-                    onToggleIncluded={() => toggleIncluded(i)}
-                  />
-                );
-              })}
+              {session.exercises.map((ex, i) => (
+                <ExerciseRow
+                  key={i}
+                  exercise={ex}
+                  index={i}
+                  prev={previousByExercise[ex.name]}
+                  onChange={(newEx) => updateExercise(i, newEx)}
+                  onEditSet={(setIdx) => setEditingSet({ exerciseIdx: i, setIdx, warmup: false })}
+                  onEditWarmup={(setIdx) => setEditingSet({ exerciseIdx: i, setIdx, warmup: true })}
+                  onDelete={() => deleteExercise(i)}
+                  onRename={(name) => updateExercise(i, { ...ex, name })}
+                  onAddSet={() => updateExercise(i, { ...ex, sets: [...ex.sets, { reps: '', weight: '', time: '', failure: false, bw: false }] })}
+                  onRemoveSet={() => updateExercise(i, { ...ex, sets: ex.sets.slice(0, -1) })}
+                  onAddWarmup={() => addWarmup(i)}
+                  onRemoveWarmup={() => removeWarmup(i)}
+                  onToggleIncluded={() => toggleIncluded(i)}
+                />
+              ))}
             </div>
             <button
               onClick={addExercise}
@@ -3225,6 +2791,29 @@ export default function App() {
                 onVoiceToggle={() => setVoiceEnabled((v) => !v)}
                 onStop={handleTimerStop}
               />
+              <button
+                onClick={() => setShowSaveConfirm(true)}
+                className={`w-full h-12 rounded-lg font-bold tracking-[0.2em] flex items-center justify-center gap-2 transition-colors ${
+                  savedFlash ? 'bg-green-500 text-black' :
+                  editingExistingId ? 'bg-amber-500 text-black active:bg-amber-600' :
+                  'bg-white text-black active:bg-neutral-200'
+                }`}
+                style={{ fontFamily: 'var(--font-display)' }}
+              >
+                {savedFlash ? (
+                  <>
+                    <Check className="w-5 h-5" /> SAVED
+                  </>
+                ) : editingExistingId ? (
+                  <>
+                    <Save className="w-5 h-5" /> SAVE CHANGES
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-5 h-5" /> SAVE SESSION
+                  </>
+                )}
+              </button>
             </div>
           </div>
 
@@ -3232,20 +2821,11 @@ export default function App() {
           {editingSet && (() => {
             const ex = session.exercises[editingSet.exerciseIdx];
             const prev = previousByExercise[ex.name];
-            // Pull suggestions from the matching slot of the prior session.
-            // Working sets read prev.setData; warmups read prev.warmupSetData.
-            let suggested = null;
-            if (editingSet.warmup) {
-              const ws = prev?.warmupSetData?.[editingSet.setIdx];
-              if (ws && (ws.weight !== '' || ws.reps !== '' || ws.bw)) {
-                suggested = { weight: ws.weight, reps: ws.reps };
-              }
-            } else {
-              const ps = prev?.setData?.[editingSet.setIdx];
-              if (ps) {
-                suggested = { weight: ps.weight, reps: ps.reps };
-              }
-            }
+            // Only pass suggestions for working sets (not warmups) from the same set index
+            const suggested = !editingSet.warmup && prev?.setData?.[editingSet.setIdx] ? {
+              weight: prev.setData[editingSet.setIdx].weight,
+              reps: prev.setData[editingSet.setIdx].reps,
+            } : null;
             const handleDeleteSet = () => {
               const updated = { ...ex };
               if (editingSet.warmup) {
