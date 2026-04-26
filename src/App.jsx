@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Plus, Minus, Save, History, Trash2, X, Check, ChevronLeft, Edit3, FileText, Dumbbell, Zap, Timer, Play, Square, RotateCcw, Volume2, Download, Upload, AlertTriangle, Database, Mic, MicOff, Flame, Eye, EyeOff, Pause, Coffee, Trophy, TrendingUp, BarChart3, ArrowRight, Target } from 'lucide-react';
+import { Plus, Minus, Save, History, Trash2, X, Check, ChevronLeft, Edit3, FileText, Dumbbell, Zap, Timer, Play, Square, RotateCcw, Volume2, Download, Upload, AlertTriangle, Database, Flame, Eye, EyeOff, Pause, Coffee, Trophy, TrendingUp, BarChart3, ArrowRight, Target } from 'lucide-react';
 
 // Workout programmes with their default exercise templates
 const PROGRAMMES = {
@@ -1194,27 +1194,25 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
 
 // ============================================================
 // Timer Widget - Set Timer with 5s countdown, beeps at 30s & 40s
-// Supports compact mode (sticky floating bar) and optional voice control
+// Supports compact mode (sticky floating bar)
 // ============================================================
-const TimerWidget = ({ compact = false, voiceEnabled = false, onVoiceToggle, onStop }) => {
+const TimerWidget = ({ compact = false, onStop }) => {
   const [phase, setPhase] = useState('idle'); // idle | countdown | running
   const [countdown, setCountdown] = useState(5);
   const [elapsed, setElapsed] = useState(0);
   const [finalTime, setFinalTime] = useState(null);
-  const [voiceStatus, setVoiceStatus] = useState('off'); // off | listening | error
   // Rest timer state
   const [restRunning, setRestRunning] = useState(false);
   const [restPaused, setRestPaused] = useState(false);
   const [restElapsed, setRestElapsed] = useState(0);
   const audioCtxRef = useRef(null);
   const wakeLockRef = useRef(null);
-  const recognitionRef = useRef(null);
   const phaseRef = useRef(phase);
   const restStartMsRef = useRef(null);
   const restPausedAtRef = useRef(null);
   const restBeepedRef = useRef(new Set());
 
-  // Keep phaseRef in sync so voice callbacks see current phase
+  // Keep phaseRef in sync
   useEffect(() => { phaseRef.current = phase; }, [phase]);
 
   // --- Audio helpers ---
@@ -1340,7 +1338,6 @@ const TimerWidget = ({ compact = false, voiceEnabled = false, onVoiceToggle, onS
   useEffect(() => {
     return () => {
       releaseWakeLock();
-      stopVoice();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1438,67 +1435,6 @@ const TimerWidget = ({ compact = false, voiceEnabled = false, onVoiceToggle, onS
     setCountdown(5);
     setElapsed(0);
   };
-
-  // --- Voice control ---
-  const startVoice = () => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) {
-      setVoiceStatus('error');
-      return false;
-    }
-    try {
-      const rec = new SR();
-      rec.continuous = true;
-      rec.interimResults = true;
-      rec.lang = 'en-GB';
-      rec.onresult = (event) => {
-        const last = event.results[event.results.length - 1];
-        const text = last[0].transcript.toLowerCase().trim();
-        // Match against common phrasings
-        if (/\b(start|go|begin)\b/.test(text) && phaseRef.current === 'idle') {
-          start();
-        } else if (/\b(stop|end|done|finish)\b/.test(text) && phaseRef.current !== 'idle') {
-          stop();
-        }
-      };
-      rec.onerror = (e) => {
-        if (e.error === 'no-speech' || e.error === 'aborted') return;
-        setVoiceStatus('error');
-      };
-      rec.onend = () => {
-        // Auto-restart if still enabled (recognition stops after a while)
-        if (recognitionRef.current === rec && voiceEnabled) {
-          try { rec.start(); } catch (e) { /* already started */ }
-        }
-      };
-      recognitionRef.current = rec;
-      rec.start();
-      setVoiceStatus('listening');
-      return true;
-    } catch (e) {
-      setVoiceStatus('error');
-      return false;
-    }
-  };
-
-  const stopVoice = () => {
-    const rec = recognitionRef.current;
-    recognitionRef.current = null;
-    if (rec) {
-      try { rec.stop(); } catch (e) {}
-    }
-    setVoiceStatus('off');
-  };
-
-  // Respond to parent voiceEnabled toggle
-  useEffect(() => {
-    if (voiceEnabled && voiceStatus === 'off') {
-      startVoice();
-    } else if (!voiceEnabled && voiceStatus !== 'off') {
-      stopVoice();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [voiceEnabled]);
 
   const isRunning = phase === 'running';
   const isCountdown = phase === 'countdown';
@@ -1702,11 +1638,6 @@ const TimerWidget = ({ compact = false, voiceEnabled = false, onVoiceToggle, onS
               <span className="text-[10px] tracking-[0.15em] uppercase font-semibold text-neutral-300 truncate" style={{ fontFamily: 'var(--font-display)' }}>
                 {statusLabel}
               </span>
-              {voiceEnabled && (
-                <span className={`text-[9px] tracking-wider font-mono ${voiceStatus === 'listening' ? 'text-red-400 animate-pulse' : 'text-neutral-600'}`}>
-                  {voiceStatus === 'listening' ? '● MIC' : voiceStatus === 'error' ? 'MIC ERR' : 'MIC'}
-                </span>
-              )}
             </div>
             <div className="relative">
               <div className="h-1.5 bg-neutral-900 rounded-full overflow-hidden">
@@ -1738,18 +1669,6 @@ const TimerWidget = ({ compact = false, voiceEnabled = false, onVoiceToggle, onS
               aria-label="Start timer"
             >
               <Play className="w-6 h-6 fill-current" />
-            </button>
-          )}
-          {/* Voice toggle */}
-          {onVoiceToggle && (
-            <button
-              onClick={onVoiceToggle}
-              className={`h-14 w-10 rounded-lg flex items-center justify-center shrink-0 border ${
-                voiceEnabled ? 'bg-red-500/20 border-red-500 text-red-400' : 'bg-neutral-900 border-neutral-800 text-neutral-500'
-              }`}
-              aria-label="Toggle voice control"
-            >
-              {voiceEnabled ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
             </button>
           )}
         </div>
@@ -2579,7 +2498,6 @@ export default function App() {
   const [editingSet, setEditingSet] = useState(null); // {exerciseIdx, setIdx, warmup?}
   const [loading, setLoading] = useState(true);
   const [savedFlash, setSavedFlash] = useState(false);
-  const [voiceEnabled, setVoiceEnabled] = useState(false);
   const [showConfetti, setShowConfetti] = useState(false);
   const [showSaveConfirm, setShowSaveConfirm] = useState(false);
   const [summaryData, setSummaryData] = useState(null); // { justSaved, previousSameProgramme } when summary should show
@@ -3291,9 +3209,8 @@ export default function App() {
           <div className="fixed bottom-0 left-0 right-0 bg-black/90 backdrop-blur-md border-t-2 border-neutral-900 z-20">
             <div className="p-3 space-y-2">
               <TimerWidget
+                key={session?.id || 'no-session'}
                 compact
-                voiceEnabled={voiceEnabled}
-                onVoiceToggle={() => setVoiceEnabled((v) => !v)}
                 onStop={handleTimerStop}
               />
             </div>
