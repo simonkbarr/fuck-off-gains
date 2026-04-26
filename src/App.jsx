@@ -124,17 +124,17 @@ const storage = {
     try { await window.storage.delete(`session:${id}`); } catch (e) { console.error(e); }
   },
   // One-time migration: clears stored programme templates AND stale draft so the current
-  // PROGRAMMES defaults + fresh-toggle logic take effect cleanly. Bumped to 4.
+  // PROGRAMMES defaults + fresh-toggle logic + trimmed-trailing logic take effect cleanly.
   async runSwapMigration() {
     try {
       const r = await window.storage.get('schema-version');
       const version = r ? Number(r.value) : 0;
-      if (version < 4) {
+      if (version < 5) {
         await window.storage.delete('template:anterior');
         await window.storage.delete('template:posterior');
         await window.storage.delete('template'); // legacy pre-programme key
-        await window.storage.delete('draft'); // clear stale draft with mismatched toggles
-        await window.storage.set('schema-version', '4');
+        await window.storage.delete('draft'); // clear stale draft with phantom trailing cells
+        await window.storage.set('schema-version', '5');
       }
     } catch (e) { console.error('Migration error:', e); }
   },
@@ -1984,34 +1984,41 @@ const SessionSummary = ({ justSaved, previousSameProgramme, allSessions, onConti
 // Stats View - deep analytics across all sessions
 // ============================================================
 const StatsView = ({ sessions, onBack }) => {
-  // Overview totals
+  const [exMetric, setExMetric] = useState('weight'); // 'weight' | 'tut'
+  const [expanded, setExpanded] = useState(new Set());
+  const toggleExpanded = (name) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name); else next.add(name);
+      return next;
+    });
+  };
+
+  // Overview totals - kept lean and relevant
   const totals = useMemo(() => {
     const sorted = [...sessions].sort((a, b) => new Date(a.date) - new Date(b.date));
-    let totalTUT = 0, totalVol = 0, totalReps = 0, totalSets = 0, totalMin = 0;
+    let totalTUT = 0, totalReps = 0, totalSets = 0;
     sorted.forEach((s) => {
       totalTUT += sessionTUT(s);
-      totalVol += sessionVolume(s);
       totalReps += sessionTotalReps(s);
       totalSets += sessionSetCount(s);
-      totalMin += Number(s.durationMin) || 0;
     });
-    // Streak: count consecutive weeks with at least one session
     const weeks = new Set(sorted.map((s) => weekKey(s.date)).filter(Boolean));
-    return { sessions: sorted.length, totalTUT, totalVol, totalReps, totalSets, totalMin, weeksTrained: weeks.size };
+    return { sessions: sorted.length, totalTUT, totalReps, totalSets, weeksTrained: weeks.size };
   }, [sessions]);
 
-  // Programme split
+  // Programme split - count by raw programme key, treat anything else as untagged
   const programmeSplit = useMemo(() => {
-    const counts = { anterior: 0, posterior: 0, other: 0 };
+    const counts = { anterior: 0, posterior: 0, untagged: 0 };
     sessions.forEach((s) => {
-      const p = s.programme || 'other';
-      if (counts[p] !== undefined) counts[p]++;
-      else counts.other++;
+      if (s.programme === 'anterior') counts.anterior++;
+      else if (s.programme === 'posterior') counts.posterior++;
+      else counts.untagged++;
     });
     return counts;
   }, [sessions]);
 
-  // Weekly frequency (last 8 weeks)
+  // Weekly frequency last 8 weeks
   const weeklyFreq = useMemo(() => {
     const now = new Date();
     const out = [];
@@ -2025,28 +2032,51 @@ const StatsView = ({ sessions, onBack }) => {
     return out;
   }, [sessions]);
 
-  // Per-exercise progression: group all sessions by exercise name, show TUT per session
+  // Rating distribution
+  const ratingDist = useMemo(() => {
+    const buckets = Array.from({ length: 10 }, (_, i) => ({ label: String(i + 1), value: 0 }));
+    sessions.forEach((s) => {
+      const r = Number(s.rating);
+      if (r >= 1 && r <= 10) buckets[r - 1].value++;
+    });
+    return buckets;
+  }, [sessions]);
+
+  // Per-exercise progression - the headline data set
+  // For each exercise, builds an array of session-level stats (max weight, total TUT)
+  // chronologically, so we can plot weight progression and TUT trend.
   const exerciseProgression = useMemo(() => {
     const map = new Map();
     const sorted = [...sessions].sort((a, b) => new Date(a.date) - new Date(b.date));
     sorted.forEach((s) => {
       (s.exercises || []).filter((ex) => ex.included !== false).forEach((ex) => {
-        if (!map.has(ex.name)) map.set(ex.name, []);
-        const tut = (ex.sets || []).reduce((sum, set) => sum + (Number(set.time) || 0), 0);
-        const vol = (ex.sets || []).reduce((sum, set) => sum + (Number(set.weight) || 0) * (Number(set.reps) || 0), 0);
-        const maxWeight = Math.max(0, ...(ex.sets || []).map((s) => Number(s.weight) || 0));
-        map.get(ex.name).push({
+        if (!map.has(ex.name)) map.set(ex.name, { unit: ex.unit, points: [] });
+        const sets = (ex.sets || []);
+        const tut = sets.reduce((sum, set) => sum + (Number(set.time) || 0), 0);
+        const maxWeight = Math.max(0, ...sets.map((st) => Number(st.weight) || 0));
+        const avgWeight = (() => {
+          const ws = sets.map((st) => Number(st.weight) || 0).filter((w) => w > 0);
+          return ws.length ? ws.reduce((a, w) => a + w, 0) / ws.length : 0;
+        })();
+        // Skip if this session had no real data for this exercise
+        if (tut === 0 && maxWeight === 0) return;
+        map.get(ex.name).points.push({
           label: new Date(s.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }),
           tut,
-          vol,
           maxWeight,
+          avgWeight,
           date: s.date,
+          programme: s.programme,
         });
       });
     });
+    // Return ordered: bodyweight last, then by number of sessions desc
     return Array.from(map.entries())
-      .filter(([, arr]) => arr.length >= 1)
-      .sort((a, b) => b[1].length - a[1].length);
+      .filter(([, v]) => v.points.length >= 1)
+      .sort((a, b) => {
+        if ((a[1].unit === 'bw') !== (b[1].unit === 'bw')) return a[1].unit === 'bw' ? 1 : -1;
+        return b[1].points.length - a[1].points.length;
+      });
   }, [sessions]);
 
   // Personal bests across all exercises
@@ -2076,26 +2106,6 @@ const StatsView = ({ sessions, onBack }) => {
       .map((s) => ({ x: Number(s.whoopRecovery), y: sessionTUT(s) }));
   }, [sessions]);
 
-  // Rating distribution
-  const ratingDist = useMemo(() => {
-    const buckets = Array.from({ length: 10 }, (_, i) => ({ label: String(i + 1), value: 0 }));
-    sessions.forEach((s) => {
-      const r = Number(s.rating);
-      if (r >= 1 && r <= 10) buckets[r - 1].value++;
-    });
-    return buckets;
-  }, [sessions]);
-
-  const [expanded, setExpanded] = useState(new Set());
-  const toggleExpanded = (name) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name); else next.add(name);
-      return next;
-    });
-  };
-  const [exMetric, setExMetric] = useState('tut'); // 'tut' | 'vol' | 'weight'
-
   if (sessions.length === 0) {
     return (
       <div className="min-h-screen bg-black text-white p-5">
@@ -2123,21 +2133,143 @@ const StatsView = ({ sessions, onBack }) => {
         </button>
         <div>
           <h1 className="text-xl tracking-widest leading-none" style={{ fontFamily: 'var(--font-display)' }}>STATS</h1>
-          <div className="text-[9px] tracking-widest text-neutral-500 mt-0.5">{totals.sessions} sessions · {totals.weeksTrained} weeks trained</div>
+          <div className="text-[9px] tracking-widest text-neutral-500 mt-0.5">{totals.sessions} session{totals.sessions === 1 ? '' : 's'} · {totals.weeksTrained} week{totals.weeksTrained === 1 ? '' : 's'} trained</div>
         </div>
       </div>
 
       <div className="p-4 space-y-5 max-w-md mx-auto">
-        {/* Overview banner */}
+
+        {/* ============================================== */}
+        {/* HEADLINE: Per-exercise progression - the No.1 stat */}
+        {/* ============================================== */}
+        {exerciseProgression.length > 0 && (
+          <section>
+            <SectionTitle icon={<TrendingUp className="w-3.5 h-3.5" />}>EXERCISE PROGRESSION</SectionTitle>
+            <div className="text-[10px] text-neutral-500 mb-3 font-mono leading-relaxed">
+              Tap an exercise for its full chart. Toggle WEIGHT vs TIME UNDER TENSION to switch view.
+            </div>
+            {/* Metric toggle - only weight and TUT (the two metrics that matter) */}
+            <div className="flex gap-1 mb-3 bg-neutral-900 p-1 rounded-lg">
+              {[{ k: 'weight', label: 'WEIGHT' }, { k: 'tut', label: 'TIME UNDER TENSION' }].map((m) => (
+                <button
+                  key={m.k}
+                  onClick={() => setExMetric(m.k)}
+                  className={`flex-1 h-9 rounded-md text-[10px] tracking-widest font-bold ${exMetric === m.k ? 'bg-orange-500 text-black' : 'text-neutral-400'}`}
+                  style={{ fontFamily: 'var(--font-display)' }}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+            <div className="space-y-2">
+              {exerciseProgression.map(([name, data]) => {
+                const isOpen = expanded.has(name);
+                const points = data.points;
+                const isBW = data.unit === 'bw';
+                const metricKey = exMetric === 'tut' ? 'tut' : 'maxWeight';
+                const unit = exMetric === 'tut' ? 's' : 'kg';
+                // Skip weight progression for bodyweight exercises (always 0)
+                if (exMetric === 'weight' && isBW) {
+                  return (
+                    <div key={name} className="bg-neutral-950 border border-neutral-800 rounded-xl p-3 opacity-50">
+                      <div className="text-sm font-semibold text-white truncate">{name}</div>
+                      <div className="text-[10px] text-neutral-600 font-mono mt-0.5">Bodyweight exercise · no weight progression</div>
+                    </div>
+                  );
+                }
+                const latest = points[points.length - 1];
+                const first = points[0];
+                const chartData = points.map((p) => ({ label: p.label, value: p[metricKey] }));
+                const deltaVal = points.length >= 2 ? latest[metricKey] - first[metricKey] : 0;
+                const sessionsCount = points.length;
+                return (
+                  <div key={name} className="bg-neutral-950 border border-neutral-800 rounded-xl overflow-hidden">
+                    <button onClick={() => toggleExpanded(name)} className="w-full p-3 flex items-center justify-between text-left active:bg-neutral-900">
+                      <div className="min-w-0 flex-1 pr-2">
+                        <div className="text-sm font-semibold text-white truncate">{name}</div>
+                        <div className="text-[10px] text-neutral-500 font-mono mt-0.5">
+                          {sessionsCount} session{sessionsCount === 1 ? '' : 's'} · latest <span className="text-orange-400 font-bold">{latest[metricKey]}{unit}</span>
+                          {sessionsCount >= 2 && first[metricKey] > 0 && <span> · started {first[metricKey]}{unit}</span>}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {sessionsCount >= 2 && (
+                          <span className={`text-[11px] font-mono font-bold ${deltaVal > 0 ? 'text-green-400' : deltaVal < 0 ? 'text-orange-400' : 'text-neutral-500'}`}>
+                            {deltaVal > 0 ? '↑' : deltaVal < 0 ? '↓' : '='}{Math.abs(Math.round(deltaVal))}{unit}
+                          </span>
+                        )}
+                        <span className="text-neutral-600 text-xs">{isOpen ? '▲' : '▼'}</span>
+                      </div>
+                    </button>
+                    {isOpen && (
+                      <div className="border-t border-neutral-900 p-3">
+                        {sessionsCount >= 2 ? (
+                          <LineChart data={chartData} height={120} unit={unit} />
+                        ) : (
+                          <div className="text-center py-3">
+                            <div className="text-2xl font-mono font-bold text-orange-400">{latest[metricKey]}{unit}</div>
+                            <div className="text-[9px] text-neutral-600 tracking-widest mt-1">Log another session to see a trend</div>
+                          </div>
+                        )}
+                        {/* Sessions table mini-summary - max weight & TUT side-by-side */}
+                        {sessionsCount >= 2 && (
+                          <div className="mt-3 pt-3 border-t border-neutral-900 grid grid-cols-2 gap-2 text-[10px] font-mono">
+                            <div className="bg-neutral-900 rounded p-2">
+                              <div className="text-neutral-500 text-[9px] tracking-widest">PEAK WEIGHT</div>
+                              <div className="text-amber-400 font-bold text-sm mt-0.5">{Math.max(...points.map(p => p.maxWeight))}kg</div>
+                            </div>
+                            <div className="bg-neutral-900 rounded p-2">
+                              <div className="text-neutral-500 text-[9px] tracking-widest">PEAK TUT (sess.)</div>
+                              <div className="text-sky-400 font-bold text-sm mt-0.5">{Math.max(...points.map(p => p.tut))}s</div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {/* Personal bests - kept just below progression */}
+        {personalBests.length > 0 && (
+          <section>
+            <SectionTitle icon={<Trophy className="w-3.5 h-3.5" />}>PERSONAL BESTS</SectionTitle>
+            <div className="bg-neutral-950 border border-neutral-800 rounded-xl overflow-hidden divide-y divide-neutral-900">
+              {personalBests.map(([name, best]) => (
+                <div key={name} className="p-3">
+                  <div className="text-sm font-semibold text-white mb-1.5 truncate">{name}</div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-mono">
+                    {best.weight.val > 0 && best.unit !== 'bw' && (
+                      <span className="text-amber-400">MAX {best.weight.val}kg<span className="text-neutral-600"> · {new Date(best.weight.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
+                    )}
+                    {best.time.val > 0 && (
+                      <span className="text-sky-400">TUT {best.time.val}s<span className="text-neutral-600"> · {new Date(best.time.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
+                    )}
+                    {best.reps.val > 0 && best.unit === 'bw' && (
+                      <span className="text-green-400">REPS {best.reps.val}<span className="text-neutral-600"> · {new Date(best.reps.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* ============================================== */}
+        {/* SECONDARY: Activity overview, split, freq, rating */}
+        {/* ============================================== */}
+
+        {/* Activity overview - relevant counters only */}
         <section>
-          <SectionTitle icon={<Target className="w-3.5 h-3.5" />}>ALL TIME</SectionTitle>
+          <SectionTitle icon={<Target className="w-3.5 h-3.5" />}>ACTIVITY OVERVIEW</SectionTitle>
           <div className="grid grid-cols-2 gap-2.5">
             <MetricCard label="Sessions" value={totals.sessions} />
-            <MetricCard label="Hours in Gym" value={(totals.totalMin / 60).toFixed(1)} />
             <MetricCard label="Total TUT" value={`${Math.round(totals.totalTUT / 60)}`} subunit="min" />
-            <MetricCard label="Total Volume" value={`${Math.round(totals.totalVol).toLocaleString()}`} subunit="kg·r" />
-            <MetricCard label="Total Sets" value={totals.totalSets} />
-            <MetricCard label="Total Reps" value={totals.totalReps} />
+            <MetricCard label="Working Sets" value={totals.totalSets} />
+            <MetricCard label="Weeks Trained" value={totals.weeksTrained} />
           </div>
         </section>
 
@@ -2146,23 +2278,28 @@ const StatsView = ({ sessions, onBack }) => {
           <SectionTitle icon={<Dumbbell className="w-3.5 h-3.5" />}>PROGRAMME SPLIT</SectionTitle>
           <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-4">
             {(() => {
-              const total = programmeSplit.anterior + programmeSplit.posterior + programmeSplit.other;
+              const total = programmeSplit.anterior + programmeSplit.posterior + programmeSplit.untagged;
               if (total === 0) return <div className="text-xs text-neutral-600 text-center py-2">No programme data</div>;
               const antPct = (programmeSplit.anterior / total) * 100;
               const postPct = (programmeSplit.posterior / total) * 100;
-              const otherPct = (programmeSplit.other / total) * 100;
+              const untaggedPct = (programmeSplit.untagged / total) * 100;
               return (
                 <>
                   <div className="flex h-8 rounded overflow-hidden mb-3">
                     {antPct > 0 && <div style={{ width: `${antPct}%` }} className="bg-orange-500 flex items-center justify-center text-[10px] text-black font-bold">{programmeSplit.anterior}</div>}
                     {postPct > 0 && <div style={{ width: `${postPct}%` }} className="bg-green-500 flex items-center justify-center text-[10px] text-black font-bold">{programmeSplit.posterior}</div>}
-                    {otherPct > 0 && <div style={{ width: `${otherPct}%` }} className="bg-neutral-600 flex items-center justify-center text-[10px] text-black font-bold">{programmeSplit.other}</div>}
+                    {untaggedPct > 0 && <div style={{ width: `${untaggedPct}%` }} className="bg-neutral-700 flex items-center justify-center text-[10px] text-black font-bold">{programmeSplit.untagged}</div>}
                   </div>
-                  <div className="flex items-center justify-between text-[10px] tracking-widest font-mono">
+                  <div className="flex items-center justify-between text-[10px] tracking-widest font-mono flex-wrap gap-y-1">
                     <span className="text-orange-400">ANTERIOR {antPct.toFixed(0)}%</span>
                     <span className="text-green-400">POSTERIOR {postPct.toFixed(0)}%</span>
-                    {programmeSplit.other > 0 && <span className="text-neutral-500">OTHER {otherPct.toFixed(0)}%</span>}
+                    {programmeSplit.untagged > 0 && <span className="text-neutral-500">UNTAGGED {untaggedPct.toFixed(0)}%</span>}
                   </div>
+                  {programmeSplit.untagged > 0 && (
+                    <div className="mt-3 pt-3 border-t border-neutral-900 text-[10px] text-neutral-500 leading-relaxed">
+                      <span className="text-amber-500 font-bold">{programmeSplit.untagged}</span> session{programmeSplit.untagged === 1 ? '' : 's'} not tagged. Open from History and use the programme selector to assign one.
+                    </div>
+                  )}
                 </>
               );
             })()}
@@ -2187,93 +2324,13 @@ const StatsView = ({ sessions, onBack }) => {
           </section>
         )}
 
-        {/* WHOOP Recovery vs TUT scatter */}
+        {/* WHOOP recovery vs performance (TUT) scatter */}
         {recoveryScatter.length >= 2 && (
           <section>
             <SectionTitle icon={<Zap className="w-3.5 h-3.5" />}>RECOVERY vs PERFORMANCE</SectionTitle>
             <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-3">
               <ScatterPlot data={recoveryScatter} height={160} xLabel="Recovery %" yLabel="Session TUT" />
               <div className="text-[9px] text-neutral-500 mt-1 text-center tracking-widest font-mono">{recoveryScatter.length} data points</div>
-            </div>
-          </section>
-        )}
-
-        {/* Per-exercise progression */}
-        {exerciseProgression.length > 0 && (
-          <section>
-            <div className="flex items-center justify-between mb-2">
-              <SectionTitle icon={<TrendingUp className="w-3.5 h-3.5" />} mb="mb-0">EXERCISE PROGRESSION</SectionTitle>
-            </div>
-            <div className="flex gap-1 mb-3 bg-neutral-900 p-1 rounded-lg">
-              {['tut', 'vol', 'weight'].map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setExMetric(m)}
-                  className={`flex-1 h-8 rounded-md text-[10px] tracking-widest font-bold ${exMetric === m ? 'bg-orange-500 text-black' : 'text-neutral-400'}`}
-                  style={{ fontFamily: 'var(--font-display)' }}
-                >
-                  {m === 'tut' ? 'TIME' : m === 'vol' ? 'VOLUME' : 'WEIGHT'}
-                </button>
-              ))}
-            </div>
-            <div className="space-y-2">
-              {exerciseProgression.map(([name, arr]) => {
-                const isOpen = expanded.has(name);
-                const latest = arr[arr.length - 1];
-                const first = arr[0];
-                const metricKey = exMetric === 'tut' ? 'tut' : exMetric === 'vol' ? 'vol' : 'maxWeight';
-                const unit = exMetric === 'tut' ? 's' : exMetric === 'vol' ? '' : 'kg';
-                const chartData = arr.map((a) => ({ label: a.label, value: a[metricKey] }));
-                const deltaVal = arr.length >= 2 ? latest[metricKey] - first[metricKey] : 0;
-                return (
-                  <div key={name} className="bg-neutral-950 border border-neutral-800 rounded-xl overflow-hidden">
-                    <button onClick={() => toggleExpanded(name)} className="w-full p-3 flex items-center justify-between text-left active:bg-neutral-900">
-                      <div className="min-w-0 flex-1 pr-2">
-                        <div className="text-sm font-semibold text-white truncate">{name}</div>
-                        <div className="text-[10px] text-neutral-500 font-mono mt-0.5">{arr.length} session{arr.length === 1 ? '' : 's'} · latest {latest[metricKey]}{unit}</div>
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0">
-                        {arr.length >= 2 && (
-                          <span className={`text-[11px] font-mono font-bold ${deltaVal > 0 ? 'text-green-400' : deltaVal < 0 ? 'text-orange-400' : 'text-neutral-500'}`}>
-                            {deltaVal > 0 ? '↑' : deltaVal < 0 ? '↓' : '='}{Math.abs(Math.round(deltaVal))}{unit}
-                          </span>
-                        )}
-                        <span className="text-neutral-600 text-xs">{isOpen ? '▲' : '▼'}</span>
-                      </div>
-                    </button>
-                    {isOpen && (
-                      <div className="border-t border-neutral-900 p-3">
-                        <LineChart data={chartData} height={110} unit={unit} />
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </section>
-        )}
-
-        {/* Personal bests */}
-        {personalBests.length > 0 && (
-          <section>
-            <SectionTitle icon={<Trophy className="w-3.5 h-3.5" />}>PERSONAL BESTS</SectionTitle>
-            <div className="bg-neutral-950 border border-neutral-800 rounded-xl overflow-hidden divide-y divide-neutral-900">
-              {personalBests.map(([name, best]) => (
-                <div key={name} className="p-3">
-                  <div className="text-sm font-semibold text-white mb-1.5 truncate">{name}</div>
-                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-mono">
-                    {best.weight.val > 0 && best.unit !== 'bw' && (
-                      <span className="text-amber-400">MAX {best.weight.val}kg<span className="text-neutral-600"> · {new Date(best.weight.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
-                    )}
-                    {best.time.val > 0 && (
-                      <span className="text-sky-400">TUT {best.time.val}s<span className="text-neutral-600"> · {new Date(best.time.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
-                    )}
-                    {best.reps.val > 0 && best.unit === 'bw' && (
-                      <span className="text-green-400">REPS {best.reps.val}<span className="text-neutral-600"> · {new Date(best.reps.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
-                    )}
-                  </div>
-                </div>
-              ))}
             </div>
           </section>
         )}
@@ -2334,10 +2391,21 @@ export default function App() {
     const last = sorted[0];
     if (!last) return null;
     const map = {};
+    // Count only sets that had real data logged. Empty trailing sets in the prior
+    // session must NOT propagate into the new session, otherwise we get cells
+    // with no suggested values dangling at the end.
+    const hasData = (st) => {
+      const r = parseInt(st.reps);
+      const w = parseFloat(st.weight);
+      const t = parseFloat(st.time);
+      return (st.bw === true) || (st.failure === true) || (Number.isFinite(r) && r > 0) || (Number.isFinite(w) && w > 0) || (Number.isFinite(t) && t > 0);
+    };
     (last.exercises || []).forEach((ex) => {
+      const setsLogged = (ex.sets || []).filter(hasData).length;
+      const warmupsLogged = (ex.warmupSets || []).filter(hasData).length;
       map[ex.name] = {
-        sets: (ex.sets || []).length,
-        warmups: (ex.warmupSets || []).length,
+        sets: setsLogged,
+        warmups: warmupsLogged,
       };
     });
     return map;
@@ -2469,13 +2537,27 @@ export default function App() {
         const withWeight = workingSets.filter((st) => !isBW && !st.bw && st.weight !== '');
         // Only record if this session actually had data logged for this exercise
         if (withTime.length === 0 && withReps.length === 0 && withWeight.length === 0) continue;
+        // Trim trailing empty sets so the new session does not inherit phantom blank cells
+        const setHasData = (st) => {
+          const r = parseInt(st.reps);
+          const w = parseFloat(st.weight);
+          const t = parseFloat(st.time);
+          return (st.bw === true) || (st.failure === true) || (Number.isFinite(r) && r > 0) || (Number.isFinite(w) && w > 0) || (Number.isFinite(t) && t > 0);
+        };
+        const trimTrailing = (arr) => {
+          let end = arr.length;
+          while (end > 0 && !setHasData(arr[end - 1])) end--;
+          return arr.slice(0, end);
+        };
+        const trimmedWorking = trimTrailing(workingSets);
+        const trimmedWarmups = trimTrailing(ex.warmupSets || []);
         const map_entry = {
           date: s.date,
           avgTime: withTime.length > 0 ? withTime.reduce((a, st) => a + parseFloat(st.time), 0) / withTime.length : null,
           avgWeight: withWeight.length > 0 ? withWeight.reduce((a, st) => a + parseFloat(st.weight), 0) / withWeight.length : null,
           totalReps: withReps.length > 0 ? withReps.reduce((a, st) => a + parseInt(st.reps), 0) : null,
-          sets: workingSets.length,
-          setData: workingSets.map((st) => ({
+          sets: trimmedWorking.length,
+          setData: trimmedWorking.map((st) => ({
             time: st.time,
             weight: st.weight,
             reps: st.reps,
@@ -2484,7 +2566,7 @@ export default function App() {
           })),
           // Warmup data from the same exercise on that prior session, kept separately.
           // Used to pre-fill suggested reps/weight on warmup cells of new sessions.
-          warmupSetData: (ex.warmupSets || []).map((st) => ({
+          warmupSetData: trimmedWarmups.map((st) => ({
             weight: st.weight,
             reps: st.reps,
             bw: st.bw,
