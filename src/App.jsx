@@ -1069,7 +1069,8 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
             if (dB !== dA) return dB - dA;
             return (b.id || 0) - (a.id || 0);
           }).map((s) => {
-            // Count any set with logged data: reps OR weight OR time (covers time-only exercises)
+            // Count working sets (those with any logged data: reps OR weight OR time).
+            // Warmup sets are excluded here and counted separately below.
             const totalSets = (s.exercises || []).reduce((a, e) => {
               if (e.included === false) return a;
               return a + (e.sets || []).filter((x) => {
@@ -1077,6 +1078,15 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
                 const hasWeight = x.weight !== '' && x.weight !== null && x.weight !== undefined && parseFloat(x.weight) > 0;
                 const hasTime = x.time !== '' && x.time !== null && x.time !== undefined && parseFloat(x.time) > 0;
                 return hasReps || hasWeight || hasTime;
+              }).length;
+            }, 0);
+            // Count warmup sets that had any logged data (reps or weight)
+            const totalWarmups = (s.exercises || []).reduce((a, e) => {
+              if (e.included === false) return a;
+              return a + (e.warmupSets || []).filter((x) => {
+                const hasReps = x.reps !== '' && x.reps !== null && x.reps !== undefined && parseInt(x.reps) > 0;
+                const hasWeight = x.weight !== '' && x.weight !== null && x.weight !== undefined && parseFloat(x.weight) > 0;
+                return hasReps || hasWeight;
               }).length;
             }, 0);
             // Resolve programme display label and force uppercase
@@ -1108,6 +1118,7 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
                 <div className="flex gap-3 text-xs text-neutral-500 mt-2 font-mono">
                   {s.durationMin && <span>{s.durationMin}min</span>}
                   <span>{totalSets} sets</span>
+                  {totalWarmups > 0 && <span className="text-amber-500">{totalWarmups} w/up</span>}
                   {s.whoopRecovery && <span className="text-orange-400">Rec {s.whoopRecovery}%</span>}
                   {s.whoopRelRecovery && <span className="text-orange-400">Rel Rec {s.whoopRelRecovery}</span>}
                   {!s.whoopRelRecovery && s.whoopStrain && <span className="text-orange-400">Strain {s.whoopStrain}</span>}
