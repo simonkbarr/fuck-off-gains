@@ -2491,15 +2491,23 @@ export default function App() {
   };
 
   const switchProgramme = async (newProgramme) => {
-    // Tapping the same programme: offer a fresh reset in case state is stale
     if (newProgramme === session?.programme) {
+      // Tapping the same programme: in edit mode do nothing, otherwise offer a fresh reset
+      if (editingExistingId) return;
       if (!confirm(`Reset ${PROGRAMMES[newProgramme].label} day to a fresh session? Current unsaved data will be lost.`)) return;
       await storage.clearDraft();
       const next = await buildSessionForProgramme(newProgramme, sessions);
       setSession(next);
       return;
     }
-    // Check if current session has any logged data
+    // EDIT MODE: just re-tag the session's programme, never touch the exercise list.
+    // This is how you fix a past session that was logged under the wrong programme.
+    if (editingExistingId) {
+      if (!confirm(`Re-tag this session as ${PROGRAMMES[newProgramme].label}? Exercise data will be kept exactly as logged.`)) return;
+      setSession((s) => ({ ...s, programme: newProgramme }));
+      return;
+    }
+    // NEW SESSION: replacing the exercise list is the right behaviour
     const hasData = session?.exercises?.some((ex) =>
       ex.sets?.some((s) => s.reps || s.weight || s.time) ||
       (ex.warmupSets || []).some((s) => s.reps || s.weight)
