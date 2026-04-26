@@ -678,6 +678,22 @@ const ExerciseRow = ({
     return { value, secondary: bits.join('·') };
   };
 
+  // Build suggested values for empty WARMUP sets (from last session's same-numbered warmup)
+  const getWarmupSuggested = (setIndex) => {
+    if (!prev?.warmupSetData?.[setIndex]) return null;
+    const ps = prev.warmupSetData[setIndex];
+    const isBW = exercise.unit === 'bw' || ps.bw;
+    const hasReps = ps.reps !== '' && parseInt(ps.reps) > 0;
+    const hasWeight = !isBW && ps.weight !== '' && parseFloat(ps.weight) > 0;
+    if (!hasReps && !hasWeight && !isBW) return null;
+    // Hero value for warmup cells is reps
+    const value = hasReps ? `${ps.reps}` : '-';
+    const bits = [];
+    if (isBW) bits.push('BW');
+    else if (hasWeight) bits.push(`${ps.weight}kg`);
+    return { value, secondary: bits.join('·') };
+  };
+
   const warmupSets = exercise.warmupSets || [];
 
   return (
@@ -790,6 +806,7 @@ const ExerciseRow = ({
                   unit={exercise.unit}
                   onClick={() => onEditWarmup(i)}
                   isWarmup
+                  suggested={getWarmupSuggested(i)}
                 />
               ))}
               <div className="flex flex-col gap-1 shrink-0 justify-center">
@@ -2300,6 +2317,62 @@ export default function App() {
     })();
   }, []);
 
+  // App-wide Screen Wake Lock - keeps the phone awake any time the app is open and visible.
+  // iOS Safari supports this from 16.4+ in tabs and from 18.4+ in installed home-screen PWAs.
+  // The OS auto-releases the lock if the user backgrounds the app, locks the phone, or the
+  // tab is hidden, so we re-acquire on every visibility change back to "visible".
+  useEffect(() => {
+    let wakeLock = null;
+    let cancelled = false;
+
+    const acquire = async () => {
+      if (cancelled) return;
+      if (typeof navigator === 'undefined' || !('wakeLock' in navigator)) return;
+      if (document.visibilityState !== 'visible') return;
+      try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        // If the OS releases the lock for any reason while we're still visible,
+        // try to take it again immediately so the screen stays on.
+        wakeLock.addEventListener('release', () => {
+          wakeLock = null;
+          if (!cancelled && document.visibilityState === 'visible') {
+            // Slight defer to avoid tight loops on a system-imposed release
+            setTimeout(acquire, 250);
+          }
+        });
+      } catch (e) {
+        // Common rejections: low battery, OS power-saving, no support. Silently ignore.
+      }
+    };
+
+    const release = () => {
+      if (wakeLock) {
+        try { wakeLock.release(); } catch (_) {}
+        wakeLock = null;
+      }
+    };
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        acquire();
+      } else {
+        release();
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibility);
+    // Some browsers also need pageshow when restoring from bfcache
+    window.addEventListener('pageshow', onVisibility);
+    acquire();
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pageshow', onVisibility);
+      release();
+    };
+  }, []);
+
   // Auto-save draft (skip when editing a past session so we don't overwrite the live draft)
   useEffect(() => {
     if (session && !loading && !editingExistingId) {
@@ -2338,7 +2411,7 @@ export default function App() {
         const withWeight = workingSets.filter((st) => !isBW && !st.bw && st.weight !== '');
         // Only record if this session actually had data logged for this exercise
         if (withTime.length === 0 && withReps.length === 0 && withWeight.length === 0) continue;
-        map[ex.name] = {
+        const map_entry = {
           date: s.date,
           avgTime: withTime.length > 0 ? withTime.reduce((a, st) => a + parseFloat(st.time), 0) / withTime.length : null,
           avgWeight: withWeight.length > 0 ? withWeight.reduce((a, st) => a + parseFloat(st.weight), 0) / withWeight.length : null,
@@ -2351,7 +2424,15 @@ export default function App() {
             bw: st.bw,
             failure: st.failure,
           })),
+          // Warmup data from the same exercise on that prior session, kept separately.
+          // Used to pre-fill suggested reps/weight on warmup cells of new sessions.
+          warmupSetData: (ex.warmupSets || []).map((st) => ({
+            weight: st.weight,
+            reps: st.reps,
+            bw: st.bw,
+          })),
         };
+        map[ex.name] = map_entry;
       }
     }
     return map;
@@ -2829,11 +2910,20 @@ export default function App() {
           {editingSet && (() => {
             const ex = session.exercises[editingSet.exerciseIdx];
             const prev = previousByExercise[ex.name];
-            // Only pass suggestions for working sets (not warmups) from the same set index
-            const suggested = !editingSet.warmup && prev?.setData?.[editingSet.setIdx] ? {
-              weight: prev.setData[editingSet.setIdx].weight,
-              reps: prev.setData[editingSet.setIdx].reps,
-            } : null;
+            // Pull suggestions from the matching slot of the prior session.
+            // Working sets read prev.setData; warmups read prev.warmupSetData.
+            let suggested = null;
+            if (editingSet.warmup) {
+              const ws = prev?.warmupSetData?.[editingSet.setIdx];
+              if (ws && (ws.weight !== '' || ws.reps !== '' || ws.bw)) {
+                suggested = { weight: ws.weight, reps: ws.reps };
+              }
+            } else {
+              const ps = prev?.setData?.[editingSet.setIdx];
+              if (ps) {
+                suggested = { weight: ps.weight, reps: ps.reps };
+              }
+            }
             const handleDeleteSet = () => {
               const updated = { ...ex };
               if (editingSet.warmup) {
