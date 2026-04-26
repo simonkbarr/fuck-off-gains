@@ -2383,10 +2383,11 @@ export default function App() {
     const sorted = [...sessionsList]
       .filter((s) => s.programme === programme)
       .sort((a, b) => {
-        const dA = new Date(a.date || 0).getTime();
-        const dB = new Date(b.date || 0).getTime();
-        if (dB !== dA) return dB - dA;
-        return (b.id || 0) - (a.id || 0);
+        // Compare normalised date strings (YYYY-MM-DD) for max reliability
+        const dateA = String(a.date || '').slice(0, 10);
+        const dateB = String(b.date || '').slice(0, 10);
+        if (dateB !== dateA) return dateB > dateA ? 1 : -1;
+        return (Number(b.id) || 0) - (Number(a.id) || 0);
       });
     const last = sorted[0];
     if (!last) return null;
@@ -2514,15 +2515,21 @@ export default function App() {
   const previousByExercise = useMemo(() => {
     const map = {};
     const currentProgramme = session?.programme;
-    // Filter to same-programme sessions, exclude the currently-loaded one, sort newest first
+    const currentId = session?.id;
+    // Only exclude the current session if it's actually saved (i.e., present in the sessions list).
+    // Drafts have an id but aren't in the list yet; using id-equality alone could accidentally
+    // exclude a saved session whose id happens to match the draft's.
+    const currentIsSaved = currentId !== undefined && sessions.some((s) => s.id === currentId);
+    // Filter to same-programme sessions, sort newest first by date (YYYY-MM-DD lexicographic works here)
     const pool = sessions
-      .filter((s) => s.id !== session?.id)
+      .filter((s) => !currentIsSaved || s.id !== currentId)
       .filter((s) => !currentProgramme || s.programme === currentProgramme)
       .sort((a, b) => {
-        const dA = new Date(a.date).getTime();
-        const dB = new Date(b.date).getTime();
-        if (dB !== dA) return dB - dA; // newer first
-        return (b.id || 0) - (a.id || 0); // tie-break by id
+        // Compare normalised date strings first for max reliability
+        const dateA = String(a.date || '').slice(0, 10);
+        const dateB = String(b.date || '').slice(0, 10);
+        if (dateB !== dateA) return dateB > dateA ? 1 : -1;
+        return (Number(b.id) || 0) - (Number(a.id) || 0);
       });
     for (const s of pool) {
       for (const ex of s.exercises || []) {
@@ -2631,7 +2638,9 @@ export default function App() {
     // Stamp id/date if missing so summary/detectPRs can identify it
     const toSave = { ...session };
     if (!toSave.id) toSave.id = `s_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    if (!toSave.date) toSave.date = new Date().toISOString();
+    if (!toSave.date) toSave.date = new Date().toISOString().slice(0, 10);
+    // Normalise existing dates to YYYY-MM-DD so all sessions sort consistently regardless of when they were saved
+    if (toSave.date && toSave.date.length > 10) toSave.date = toSave.date.slice(0, 10);
     await storage.saveSession(toSave);
     const all = await storage.listSessions();
     setSessions(all);
