@@ -3049,9 +3049,26 @@ export default function App() {
                   type="date"
                   value={session.date}
                   onChange={(e) => updateSession({ date: e.target.value })}
-                  className="w-full bg-neutral-900 border border-neutral-800 text-white px-2 h-11 rounded text-[13px] block text-left"
-                  style={{ minWidth: 0, maxWidth: '100%', WebkitAppearance: 'none', appearance: 'none', textAlign: 'left' }}
+                  className="fogt-date-input w-full bg-neutral-900 border border-neutral-800 text-white px-2 h-11 rounded text-[13px] block"
+                  style={{
+                    minWidth: 0,
+                    maxWidth: '100%',
+                    WebkitAppearance: 'none',
+                    appearance: 'none',
+                    textAlign: 'left',
+                    textAlignLast: 'left',
+                    lineHeight: '44px',
+                    fontVariantNumeric: 'tabular-nums',
+                    direction: 'ltr',
+                  }}
                 />
+                {/* iOS Safari overrides text-align inside the date input via pseudo-elements; pin them with scoped CSS. */}
+                <style>{`
+                  .fogt-date-input { text-align: left !important; text-align-last: left !important; }
+                  .fogt-date-input::-webkit-date-and-time-value { text-align: left !important; padding-left: 0 !important; margin: 0 !important; min-height: 1em; }
+                  .fogt-date-input::-webkit-datetime-edit { text-align: left !important; padding: 0 !important; }
+                  .fogt-date-input::-webkit-datetime-edit-fields-wrapper { padding: 0 !important; }
+                `}</style>
               </div>
               <div className="shrink-0" style={{ width: '90px' }}>
                 <label className="text-[10px] tracking-[0.2em] text-neutral-500 uppercase block mb-1" style={{ fontFamily: 'var(--font-display)' }}>Duration</label>
