@@ -184,13 +184,70 @@ const workingSets = (session) => {
 // Sum of set times across working sets
 const sessionTUT = (session) => workingSets(session).reduce((sum, s) => sum + (Number(s.time) || 0), 0);
 
-// Total volume = weight × reps across non-BW working sets
+// Total volume = weight × reps across non-BW working sets (kept for legacy/CSV compatibility)
 const sessionVolume = (session) => workingSets(session).reduce((sum, s) => {
   if (s.bw || s._unit === 'bw') return sum; // BW exercises excluded from volume
   const w = Number(s.weight) || 0;
   const r = Number(s.reps) || 0;
   return sum + w * r;
 }, 0);
+
+// Tonnage for time-based training: sum of (weight × time) across non-BW working sets.
+// This is the right progressive-overload metric when sets are timed, not rep-counted.
+// Units: kg·s (kilogram-seconds). A heavier set held the same time, or the same weight held longer, both increase this.
+const sessionTonnage = (session) => workingSets(session).reduce((sum, s) => {
+  if (s.bw || s._unit === 'bw') return sum;
+  const w = Number(s.weight) || 0;
+  const t = Number(s.time) || 0;
+  return sum + w * t;
+}, 0);
+
+// Sum of weight across all logged non-BW working sets (raw "weight moved" indicator)
+const sessionTotalWeight = (session) => workingSets(session).reduce((sum, s) => {
+  if (s.bw || s._unit === 'bw') return sum;
+  const w = Number(s.weight) || 0;
+  if (w === 0) return sum;
+  return sum + w;
+}, 0);
+
+// Overall progression score: average % change across matched same-programme exercises.
+// Compares each exercise's session-level (weight × time) total this session vs last.
+// Returns { score: number (percent), matched: number, components: [{ name, deltaPct, prev, curr }] }
+const computeProgressionScore = (current, previous) => {
+  if (!current || !previous) return { score: null, matched: 0, components: [] };
+  const prevByName = new Map();
+  (previous.exercises || []).forEach((ex) => {
+    if (ex.included === false) return;
+    const total = (ex.sets || []).reduce((sum, s) => {
+      const w = Number(s.weight) || 0;
+      const t = Number(s.time) || 0;
+      const r = Number(s.reps) || 0;
+      // For BW exercises use reps × time; for weighted use weight × time (or weight × reps if no time)
+      if (ex.unit === 'bw' || s.bw) return sum + (r * (t || 1));
+      return sum + (w * (t || 1)) + (w * r);
+    }, 0);
+    if (total > 0) prevByName.set(ex.name, total);
+  });
+  const components = [];
+  (current.exercises || []).forEach((ex) => {
+    if (ex.included === false) return;
+    const prevTotal = prevByName.get(ex.name);
+    if (!prevTotal) return;
+    const total = (ex.sets || []).reduce((sum, s) => {
+      const w = Number(s.weight) || 0;
+      const t = Number(s.time) || 0;
+      const r = Number(s.reps) || 0;
+      if (ex.unit === 'bw' || s.bw) return sum + (r * (t || 1));
+      return sum + (w * (t || 1)) + (w * r);
+    }, 0);
+    if (total === 0) return;
+    const deltaPct = ((total - prevTotal) / prevTotal) * 100;
+    components.push({ name: ex.name, deltaPct, prev: prevTotal, curr: total });
+  });
+  if (components.length === 0) return { score: null, matched: 0, components: [] };
+  const score = components.reduce((sum, c) => sum + c.deltaPct, 0) / components.length;
+  return { score, matched: components.length, components };
+};
 
 // Count of logged working sets (where at least one of time/reps/weight is set)
 const sessionSetCount = (session) => workingSets(session).filter((s) => (Number(s.time) || 0) > 0 || (Number(s.reps) || 0) > 0 || (Number(s.weight) || 0) > 0).length;
@@ -533,22 +590,20 @@ const SetCell = ({ set, unit, onClick, index, prevSet, isWarmup = false, suggest
   const hasReps = set.reps !== '' && parseInt(set.reps) > 0;
   const isBW = set.bw || unit === 'bw';
 
-  // For warmup sets, reps is always the hero (no time tracking)
-  const heroValue = isWarmup
-    ? (hasReps ? set.reps : '-')
-    : (hasTime ? set.time : (hasReps ? set.reps : '-'));
-  const heroLabel = isWarmup ? 'REPS' : (hasTime ? 'SEC' : 'REPS');
+  // Hero priority: time > reps. Same for warmup and working - if a time is logged, show it.
+  const heroValue = (hasTime ? set.time : (hasReps ? set.reps : '-'));
+  const heroLabel = (hasTime ? 'SEC' : 'REPS');
 
-  // Secondary line
+  // Secondary line: show whatever isn't the hero
   const bits = [];
-  if (!isWarmup && hasTime && hasReps) bits.push(`${set.reps}r`);
+  if (hasTime && hasReps) bits.push(`${set.reps}r`);
   if (set.failure) bits.push('FAIL');
   else if (isBW) bits.push('BW');
   else if (set.weight !== '') bits.push(`${set.weight}kg`);
 
-  // Delta vs previous session (only for working sets)
+  // Delta vs previous session (now applies to both warmups and working sets)
   let delta = null;
-  if (!isWarmup && prevSet) {
+  if (prevSet) {
     if (hasTime && prevSet.time !== '' && parseFloat(prevSet.time) > 0) {
       const diff = parseFloat(set.time) - parseFloat(prevSet.time);
       if (Math.abs(diff) >= 1) {
@@ -1196,7 +1251,7 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
 // Timer Widget - Set Timer with 5s countdown, beeps at 30s & 40s
 // Supports compact mode (sticky floating bar)
 // ============================================================
-const TimerWidget = ({ compact = false, onStop }) => {
+const TimerWidget = ({ compact = false, onStop, lastLogged = null, onClearLastLogged }) => {
   const [phase, setPhase] = useState('idle'); // idle | countdown | running
   const [countdown, setCountdown] = useState(5);
   const [elapsed, setElapsed] = useState(0);
@@ -1417,6 +1472,8 @@ const TimerWidget = ({ compact = false, onStop }) => {
     setPhase('countdown');
     // Starting a new set means rest is over
     stopRest();
+    // Clear the "last logged" chip since we are now beginning the next set
+    if (onClearLastLogged) onClearLastLogged();
   };
 
   const stop = () => {
@@ -1507,6 +1564,39 @@ const TimerWidget = ({ compact = false, onStop }) => {
 
     return (
       <div className="space-y-2">
+        {/* Just-logged set chip - shown alongside rest so the user can see what was just banked */}
+        {restRunning && lastLogged && (
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/95 px-3 py-2 flex items-center justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="text-[9px] tracking-[0.3em] uppercase font-bold text-neutral-500 leading-none mb-1" style={{ fontFamily: 'var(--font-display)' }}>
+                {lastLogged.isWarmup ? 'WARM-UP' : `SET ${lastLogged.setNumber}`} JUST LOGGED · {lastLogged.exercise}
+              </div>
+              <div className="flex items-baseline gap-3 font-mono">
+                <span className="text-2xl font-bold text-white leading-none">{lastLogged.time}<span className="text-xs text-neutral-500 ml-0.5">s</span></span>
+                {lastLogged.bw ? (
+                  <span className="text-sm text-amber-400 font-bold">BW</span>
+                ) : lastLogged.weight !== '' && lastLogged.weight !== undefined && lastLogged.weight !== null ? (
+                  <span className="text-sm text-orange-400 font-bold">{lastLogged.weight}kg</span>
+                ) : null}
+                {lastLogged.reps !== '' && lastLogged.reps !== undefined && lastLogged.reps !== null && (
+                  <span className="text-xs text-neutral-400">{lastLogged.reps}r</span>
+                )}
+                {/* Delta vs previous session for the same set */}
+                {lastLogged.prevTime && Number(lastLogged.prevTime) > 0 && (
+                  (() => {
+                    const diff = Number(lastLogged.time) - Number(lastLogged.prevTime);
+                    if (Math.abs(diff) < 1) return null;
+                    return (
+                      <span className={`text-xs font-bold ${diff > 0 ? 'text-green-400' : 'text-orange-400'}`}>
+                        {diff > 0 ? '↑+' : '↓'}{Math.abs(Math.round(diff))}s
+                      </span>
+                    );
+                  })()
+                )}
+              </div>
+            </div>
+          </div>
+        )}
         {/* Rest timer - large stopwatch face overlay above the set timer */}
         {restRunning && (
           <div
@@ -2030,8 +2120,10 @@ const MetricCard = ({ label, value, subunit, prev, current, unit = '' }) => {
 const SessionSummary = ({ justSaved, previousSameProgramme, allSessions, onContinue }) => {
   const tut = sessionTUT(justSaved);
   const prevTUT = previousSameProgramme ? sessionTUT(previousSameProgramme) : null;
-  const vol = sessionVolume(justSaved);
-  const prevVol = previousSameProgramme ? sessionVolume(previousSameProgramme) : null;
+  const tonnage = sessionTonnage(justSaved);
+  const prevTonnage = previousSameProgramme ? sessionTonnage(previousSameProgramme) : null;
+  const totalWeight = sessionTotalWeight(justSaved);
+  const prevTotalWeight = previousSameProgramme ? sessionTotalWeight(previousSameProgramme) : null;
   const sets = sessionSetCount(justSaved);
   const prevSets = previousSameProgramme ? sessionSetCount(previousSameProgramme) : null;
   const avgTime = sessionAvgSetTime(justSaved);
@@ -2042,6 +2134,7 @@ const SessionSummary = ({ justSaved, previousSameProgramme, allSessions, onConti
   const prs = detectPRs(justSaved, allSessions);
   const highlights = generateHighlights(justSaved, previousSameProgramme);
   const programmeName = (PROGRAMMES[justSaved.programme]?.label || justSaved.programme || 'Session').toUpperCase();
+  const progression = computeProgressionScore(justSaved, previousSameProgramme);
 
   return (
     <div className="fixed inset-0 z-[9998] overflow-y-auto" style={{ backgroundColor: '#000000' }}>
@@ -2053,28 +2146,56 @@ const SessionSummary = ({ justSaved, previousSameProgramme, allSessions, onConti
           {justSaved.durationMin && <div className="text-xs text-neutral-500 mt-3 font-mono">{justSaved.durationMin} min{justSaved.rating ? ` · rated ${justSaved.rating}/10` : ''}</div>}
         </div>
 
+        {/* Headline progression score - the gross workout-vs-last delta */}
+        {progression.score !== null && (
+          <div className={`mb-4 rounded-xl p-4 border-2 ${
+            progression.score > 0 ? 'bg-green-950/40 border-green-600' :
+            progression.score < 0 ? 'bg-orange-950/40 border-orange-600' :
+            'bg-neutral-950 border-neutral-800'
+          }`}>
+            <div className="flex items-center gap-2 mb-2">
+              <TrendingUp className={`w-4 h-4 ${progression.score > 0 ? 'text-green-400' : progression.score < 0 ? 'text-orange-400' : 'text-neutral-400'}`} />
+              <span className="text-[10px] tracking-[0.3em] font-bold uppercase text-neutral-300" style={{ fontFamily: 'var(--font-display)' }}>Overall Progression</span>
+            </div>
+            <div className="flex items-baseline gap-2">
+              <span className={`font-mono font-black text-4xl leading-none ${progression.score > 0 ? 'text-green-300' : progression.score < 0 ? 'text-orange-300' : 'text-neutral-300'}`}>
+                {progression.score > 0 ? '+' : ''}{progression.score.toFixed(1)}%
+              </span>
+              <span className="text-[10px] tracking-widest text-neutral-500 font-mono">vs last {programmeName.toLowerCase()}</span>
+            </div>
+            <div className="text-[10px] text-neutral-500 mt-2 leading-relaxed">
+              Combined weight × time across {progression.matched} matched exercise{progression.matched === 1 ? '' : 's'}. Heavier weight or longer hold both push this up.
+            </div>
+          </div>
+        )}
+
         {/* Metric grid */}
         <div className="grid grid-cols-2 gap-2.5 mb-4">
           <MetricCard label="Time Under Tension" value={tut} subunit="s" prev={prevTUT} current={tut} unit="s" />
-          <MetricCard label="Total Volume" value={Math.round(vol)} subunit="kg·r" prev={prevVol} current={vol} unit="" />
+          <MetricCard label="Tonnage (kg·s)" value={Math.round(tonnage)} subunit="kg·s" prev={prevTonnage} current={tonnage} unit="" />
           <MetricCard label="Avg Set Time" value={avgTime.toFixed(1)} subunit="s" prev={prevAvg} current={avgTime} unit="s" />
           <MetricCard label="Sets Completed" value={sets} prev={prevSets} current={sets} unit="" />
-          <MetricCard label="Total Reps" value={reps} prev={prevReps} current={reps} unit="" />
+          <MetricCard label="Total Weight Moved" value={Math.round(totalWeight)} subunit="kg" prev={prevTotalWeight} current={totalWeight} unit="kg" />
           {justSaved.whoopRecovery && <MetricCard label="WHOOP Recovery" value={justSaved.whoopRecovery} subunit="%" prev={previousSameProgramme?.whoopRecovery ? Number(previousSameProgramme.whoopRecovery) : null} current={Number(justSaved.whoopRecovery)} unit="%" />}
         </div>
 
-        {/* PRs */}
+        {/* PRs - now with weight values + delta vs prev session for the same exercise */}
         {prs.length > 0 && (
           <div className="mb-4 bg-amber-950/40 border-2 border-amber-600 rounded-xl p-4">
             <div className="flex items-center gap-2 mb-3">
               <Trophy className="w-5 h-5 text-amber-400" />
               <span className="text-xs tracking-[0.3em] text-amber-400 font-bold uppercase" style={{ fontFamily: 'var(--font-display)' }}>Personal Bests</span>
             </div>
-            <div className="space-y-1.5">
+            <div className="space-y-2">
               {prs.map((pr, i) => (
-                <div key={i} className="flex items-center justify-between text-sm">
-                  <span className="font-semibold text-white truncate pr-2">{pr.exercise}</span>
-                  <span className="text-amber-300 font-mono text-xs shrink-0">{pr.prev}{pr.unit} → <span className="text-amber-200 font-bold">{pr.current}{pr.unit}</span></span>
+                <div key={i} className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-white text-sm truncate flex-1 min-w-0">{pr.exercise}</span>
+                  <div className="flex items-center gap-1.5 shrink-0 text-xs font-mono">
+                    <span className="text-amber-300/70">{pr.prev}{pr.unit}</span>
+                    <span className="text-amber-500">→</span>
+                    <span className="text-amber-200 font-bold">{pr.current}{pr.unit}</span>
+                    <span className="text-green-400 font-bold ml-1">+{(pr.current - pr.prev)}{pr.unit}</span>
+                  </div>
                 </div>
               ))}
             </div>
@@ -2220,18 +2341,35 @@ const StatsView = ({ sessions, onBack }) => {
 
   // Personal bests across all exercises
   const personalBests = useMemo(() => {
+    // Walk sessions in chronological order. For each exercise, track the running PB
+    // and the previous PB before the latest one was set, so we can show the delta.
+    const sorted = [...sessions].sort((a, b) => new Date(a.date) - new Date(b.date));
     const bests = new Map();
-    sessions.forEach((s) => {
+    sorted.forEach((s) => {
       (s.exercises || []).filter((ex) => ex.included !== false).forEach((ex) => {
-        if (!bests.has(ex.name)) bests.set(ex.name, { weight: { val: 0, date: null }, time: { val: 0, date: null }, reps: { val: 0, date: null }, unit: ex.unit });
+        if (!bests.has(ex.name)) {
+          bests.set(ex.name, {
+            // For each metric: current best AND the previous best before that
+            weight: { val: 0, date: null, prevVal: 0, prevDate: null },
+            time: { val: 0, date: null, prevVal: 0, prevDate: null },
+            reps: { val: 0, date: null, prevVal: 0, prevDate: null },
+            unit: ex.unit,
+          });
+        }
         const best = bests.get(ex.name);
         (ex.sets || []).forEach((set) => {
           const w = Number(set.weight) || 0;
           const t = Number(set.time) || 0;
           const r = Number(set.reps) || 0;
-          if (w > best.weight.val) best.weight = { val: w, date: s.date };
-          if (t > best.time.val) best.time = { val: t, date: s.date };
-          if (r > best.reps.val) best.reps = { val: r, date: s.date };
+          if (w > best.weight.val) {
+            best.weight = { val: w, date: s.date, prevVal: best.weight.val, prevDate: best.weight.date };
+          }
+          if (t > best.time.val) {
+            best.time = { val: t, date: s.date, prevVal: best.time.val, prevDate: best.time.date };
+          }
+          if (r > best.reps.val) {
+            best.reps = { val: r, date: s.date, prevVal: best.reps.val, prevDate: best.reps.date };
+          }
         });
       });
     });
@@ -2372,27 +2510,68 @@ const StatsView = ({ sessions, onBack }) => {
           </section>
         )}
 
-        {/* Personal bests - kept just below progression */}
+        {/* Personal bests - shows current PB AND increase vs previous PB so progression is visible */}
         {personalBests.length > 0 && (
           <section>
             <SectionTitle icon={<Trophy className="w-3.5 h-3.5" />}>PERSONAL BESTS</SectionTitle>
+            <div className="text-[10px] text-neutral-500 mb-2 font-mono leading-relaxed">
+              Current best per exercise. Delta shows the gain from the previous PB. Goal: heavier weight + longer TUT.
+            </div>
             <div className="bg-neutral-950 border border-neutral-800 rounded-xl overflow-hidden divide-y divide-neutral-900">
-              {personalBests.map(([name, best]) => (
-                <div key={name} className="p-3">
-                  <div className="text-sm font-semibold text-white mb-1.5 truncate">{name}</div>
-                  <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] font-mono">
-                    {best.weight.val > 0 && best.unit !== 'bw' && (
-                      <span className="text-amber-400">MAX {best.weight.val}kg<span className="text-neutral-600"> · {new Date(best.weight.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
-                    )}
-                    {best.time.val > 0 && (
-                      <span className="text-sky-400">TUT {best.time.val}s<span className="text-neutral-600"> · {new Date(best.time.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
-                    )}
-                    {best.reps.val > 0 && best.unit === 'bw' && (
-                      <span className="text-green-400">REPS {best.reps.val}<span className="text-neutral-600"> · {new Date(best.reps.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span></span>
-                    )}
+              {personalBests.map(([name, best]) => {
+                const wDelta = best.weight.prevVal > 0 ? best.weight.val - best.weight.prevVal : null;
+                const tDelta = best.time.prevVal > 0 ? best.time.val - best.time.prevVal : null;
+                const rDelta = best.reps.prevVal > 0 ? best.reps.val - best.reps.prevVal : null;
+                return (
+                  <div key={name} className="p-3">
+                    <div className="text-sm font-semibold text-white mb-2 truncate">{name}</div>
+                    <div className="space-y-1.5">
+                      {best.weight.val > 0 && best.unit !== 'bw' && (
+                        <div className="flex items-baseline justify-between gap-2 text-[11px] font-mono">
+                          <span className="text-neutral-500 tracking-widest">PEAK WEIGHT</span>
+                          <span className="flex items-baseline gap-1.5 shrink-0">
+                            <span className="text-amber-400 font-bold text-sm">{best.weight.val}kg</span>
+                            {wDelta !== null && wDelta > 0 ? (
+                              <span className="text-green-400 font-bold">+{wDelta}kg vs {best.weight.prevVal}kg</span>
+                            ) : best.weight.prevVal === 0 ? (
+                              <span className="text-neutral-600">first record</span>
+                            ) : null}
+                            <span className="text-neutral-600 ml-1">{new Date(best.weight.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span>
+                          </span>
+                        </div>
+                      )}
+                      {best.time.val > 0 && (
+                        <div className="flex items-baseline justify-between gap-2 text-[11px] font-mono">
+                          <span className="text-neutral-500 tracking-widest">PEAK TUT</span>
+                          <span className="flex items-baseline gap-1.5 shrink-0">
+                            <span className="text-sky-400 font-bold text-sm">{best.time.val}s</span>
+                            {tDelta !== null && tDelta > 0 ? (
+                              <span className="text-green-400 font-bold">+{tDelta}s vs {best.time.prevVal}s</span>
+                            ) : best.time.prevVal === 0 ? (
+                              <span className="text-neutral-600">first record</span>
+                            ) : null}
+                            <span className="text-neutral-600 ml-1">{new Date(best.time.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span>
+                          </span>
+                        </div>
+                      )}
+                      {best.reps.val > 0 && best.unit === 'bw' && (
+                        <div className="flex items-baseline justify-between gap-2 text-[11px] font-mono">
+                          <span className="text-neutral-500 tracking-widest">PEAK REPS</span>
+                          <span className="flex items-baseline gap-1.5 shrink-0">
+                            <span className="text-green-400 font-bold text-sm">{best.reps.val}</span>
+                            {rDelta !== null && rDelta > 0 ? (
+                              <span className="text-green-400 font-bold">+{rDelta} vs {best.reps.prevVal}</span>
+                            ) : best.reps.prevVal === 0 ? (
+                              <span className="text-neutral-600">first record</span>
+                            ) : null}
+                            <span className="text-neutral-600 ml-1">{new Date(best.reps.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}</span>
+                          </span>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </section>
         )}
@@ -2499,6 +2678,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [savedFlash, setSavedFlash] = useState(false);
   const [showConfetti, setShowConfetti] = useState(false);
+  // Tracks the most recently auto-filled set/warmup so the rest timer can display it as "last logged"
+  const [lastLogged, setLastLogged] = useState(null); // { exercise, isWarmup, setNumber, time, weight, reps, bw, prevTime, prevWeight }
   const [showSaveConfirm, setShowSaveConfirm] = useState(false);
   const [summaryData, setSummaryData] = useState(null); // { justSaved, previousSameProgramme } when summary should show
   const [editingExistingId, setEditingExistingId] = useState(null); // set when loading a past session to edit
@@ -2885,37 +3066,79 @@ export default function App() {
     setSession(next);
   };
 
-  // --- Timer stop callback: auto-fill next empty working set in first included exercise ---
-  // Subtracts 3 seconds to compensate for delay between set completion and tapping stop
+  // --- Timer stop callback: auto-fill next empty slot (warmup OR working set) in natural order ---
+  // Subtracts 3 seconds to compensate for the delay between set completion and tapping stop.
+  // Walks exercises top-to-bottom, and for each one fills warmups first, then working sets.
   const handleTimerStop = (elapsedSeconds) => {
     const adjusted = Math.max(1, elapsedSeconds - 3);
+    let toLog = null; // captured in the updater for setLastLogged after
     setSession((s) => {
       if (!s) return s;
       const exercises = [...s.exercises];
       for (let i = 0; i < exercises.length; i++) {
         const ex = exercises[i];
         if (ex.included === false) continue;
+        const isBW = ex.unit === 'bw';
+        const prev = previousByExercise[ex.name];
+
+        // First: try to fill an empty warmup slot for this exercise
+        const warmups = ex.warmupSets || [];
+        const emptyWarmupIdx = warmups.findIndex((st) => st.time === '' || st.time === undefined || st.time === null);
+        const anyWorkingStarted = (ex.sets || []).some((st) => (st.time !== '' && st.time !== undefined && st.time !== null) || (st.reps !== '' && st.reps !== undefined && st.reps !== null) || st.failure);
+        if (emptyWarmupIdx !== -1 && !anyWorkingStarted) {
+          const prevW = prev?.warmupSetData?.[emptyWarmupIdx];
+          const newW = { ...warmups[emptyWarmupIdx], time: adjusted };
+          if (!isBW && !newW.bw && prevW && prevW.weight !== '' && prevW.weight !== 0 && (newW.weight === '' || newW.weight === 0)) {
+            newW.weight = prevW.weight;
+          }
+          if (!newW.reps && prevW && prevW.reps !== '' && prevW.reps !== 0) {
+            newW.reps = prevW.reps;
+          }
+          const newWarmups = [...warmups];
+          newWarmups[emptyWarmupIdx] = newW;
+          exercises[i] = { ...ex, warmupSets: newWarmups };
+          toLog = {
+            exercise: ex.name,
+            isWarmup: true,
+            setNumber: emptyWarmupIdx + 1,
+            time: adjusted,
+            weight: newW.weight,
+            reps: newW.reps,
+            bw: newW.bw || isBW,
+            prevTime: prevW?.time,
+            prevWeight: prevW?.weight,
+          };
+          return { ...s, exercises };
+        }
+
+        // Otherwise fill the next empty working set
         const emptyIdx = ex.sets.findIndex((st) => st.time === '' && st.reps === '' && !st.failure);
         if (emptyIdx === -1) continue;
-        // Pull suggested weight from previous session's same-numbered set
-        const prev = previousByExercise[ex.name];
         const prevSet = prev?.setData?.[emptyIdx];
-        const isBW = ex.unit === 'bw';
-        const newSet = {
-          ...ex.sets[emptyIdx],
-          time: adjusted,
-        };
-        // Auto-fill weight from previous session's same set if available and not bodyweight
+        const newSet = { ...ex.sets[emptyIdx], time: adjusted };
         if (!isBW && !newSet.bw && prevSet && prevSet.weight !== '' && prevSet.weight !== 0 && (newSet.weight === '' || newSet.weight === 0)) {
           newSet.weight = prevSet.weight;
         }
         const newSets = [...ex.sets];
         newSets[emptyIdx] = newSet;
         exercises[i] = { ...ex, sets: newSets };
-        break;
+        toLog = {
+          exercise: ex.name,
+          isWarmup: false,
+          setNumber: emptyIdx + 1,
+          time: adjusted,
+          weight: newSet.weight,
+          reps: newSet.reps,
+          bw: newSet.bw || isBW,
+          prevTime: prevSet?.time,
+          prevWeight: prevSet?.weight,
+        };
+        return { ...s, exercises };
       }
-      return { ...s, exercises };
+      return s;
     });
+    // Defer the state update to avoid double-render warnings inside the setSession updater
+    if (toLog) setTimeout(() => setLastLogged(toLog), 0);
   };
 
   if (loading || !session) {
@@ -3135,6 +3358,58 @@ export default function App() {
 
           {/* Exercises */}
           <div className="mt-4">
+            {/* Last session summary - shown only on fresh sessions when there's a prior same-programme record */}
+            {!editingExistingId && (() => {
+              const currentProgramme = session?.programme;
+              if (!currentProgramme) return null;
+              const sameProg = sessions
+                .filter((s) => s.programme === currentProgramme)
+                .sort((a, b) => {
+                  const dA = String(a.date || '').slice(0, 10);
+                  const dB = String(b.date || '').slice(0, 10);
+                  if (dB !== dA) return dB > dA ? 1 : -1;
+                  return (Number(b.id) || 0) - (Number(a.id) || 0);
+                });
+              const last = sameProg[0];
+              if (!last) return null;
+              const lastTUT = sessionTUT(last);
+              const lastTonnage = sessionTonnage(last);
+              const lastTotalWeight = sessionTotalWeight(last);
+              const lastSets = sessionSetCount(last);
+              const lastDate = new Date(last.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }).toUpperCase();
+              const programmeLabel = (PROGRAMMES[currentProgramme]?.label || currentProgramme).toUpperCase();
+              return (
+                <div className="mb-3 mx-4 bg-neutral-950 border border-neutral-800 rounded-xl p-3">
+                  <div className="text-[9px] tracking-[0.3em] text-neutral-500 font-mono mb-2">
+                    LAST {programmeLabel} · {lastDate}
+                  </div>
+                  <div className="grid grid-cols-4 gap-2">
+                    <div>
+                      <div className="text-[8px] tracking-widest text-neutral-600 font-mono">SETS</div>
+                      <div className="text-base font-bold font-mono text-white leading-none mt-0.5">{lastSets}</div>
+                    </div>
+                    <div>
+                      <div className="text-[8px] tracking-widest text-neutral-600 font-mono">TUT</div>
+                      <div className="text-base font-bold font-mono text-sky-300 leading-none mt-0.5">{Math.floor(lastTUT/60)}:{String(lastTUT%60).padStart(2,'0')}</div>
+                    </div>
+                    <div>
+                      <div className="text-[8px] tracking-widest text-neutral-600 font-mono">WEIGHT</div>
+                      <div className="text-base font-bold font-mono text-orange-400 leading-none mt-0.5">{Math.round(lastTotalWeight)}<span className="text-[9px] text-neutral-500 ml-0.5">kg</span></div>
+                    </div>
+                    <div>
+                      <div className="text-[8px] tracking-widest text-neutral-600 font-mono">TONNAGE</div>
+                      <div className="text-base font-bold font-mono text-amber-300 leading-none mt-0.5">{Math.round(lastTonnage)}<span className="text-[9px] text-neutral-500 ml-0.5">kg·s</span></div>
+                    </div>
+                  </div>
+                  {last.whoopRecovery && (
+                    <div className="mt-2 pt-2 border-t border-neutral-900 text-[10px] text-neutral-500 font-mono flex items-center gap-3">
+                      <span>WHOOP {last.whoopRecovery}%</span>
+                      {last.rating && <span>· Rated {last.rating}/10</span>}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             <div className="bg-white px-4 py-2 flex items-center justify-between">
               <h2 className="text-black tracking-[0.25em] text-lg font-bold" style={{ fontFamily: 'var(--font-display)' }}>
                 EXERCISES
@@ -3212,6 +3487,8 @@ export default function App() {
                 key={session?.id || 'no-session'}
                 compact
                 onStop={handleTimerStop}
+                lastLogged={lastLogged}
+                onClearLastLogged={() => setLastLogged(null)}
               />
             </div>
           </div>
