@@ -3387,7 +3387,6 @@ export default function App() {
               const last = sameProg[0];
               if (!last) return null;
               const lastTUT = sessionTUT(last);
-              const lastTonnage = sessionTonnage(last);
               const lastSets = sessionSetCount(last);
               // Count of included exercises that had at least one logged set
               const lastExerciseCount = (last.exercises || [])
@@ -3401,7 +3400,7 @@ export default function App() {
                   <div className="text-[9px] tracking-[0.3em] text-neutral-500 font-mono mb-2">
                     LAST {programmeLabel} · {lastDate}
                   </div>
-                  <div className="grid grid-cols-4 gap-2">
+                  <div className="grid grid-cols-3 gap-2">
                     <div>
                       <div className="text-[8px] tracking-widest text-neutral-600 font-mono">EXERCISES</div>
                       <div className="text-base font-bold font-mono text-white leading-none mt-0.5">{lastExerciseCount}</div>
@@ -3414,10 +3413,6 @@ export default function App() {
                       <div className="text-[8px] tracking-widest text-neutral-600 font-mono">TUT</div>
                       <div className="text-base font-bold font-mono text-sky-300 leading-none mt-0.5">{Math.floor(lastTUT/60)}:{String(lastTUT%60).padStart(2,'0')}</div>
                     </div>
-                    <div>
-                      <div className="text-[8px] tracking-widest text-neutral-600 font-mono" title="Weight × time across all working sets - heavier or longer both push it up">TONNAGE</div>
-                      <div className="text-base font-bold font-mono text-amber-300 leading-none mt-0.5">{Math.round(lastTonnage)}<span className="text-[9px] text-neutral-500 ml-0.5">kg·s</span></div>
-                    </div>
                   </div>
                   {last.whoopRecovery && (
                     <div className="mt-2 pt-2 border-t border-neutral-900 text-[10px] text-neutral-500 font-mono flex items-center gap-3">
@@ -3425,9 +3420,6 @@ export default function App() {
                       {last.rating && <span>· Rated {last.rating}/10</span>}
                     </div>
                   )}
-                  <div className="mt-2 text-[9px] text-neutral-600 leading-relaxed">
-                    Tonnage = total weight × time across all working sets. The single best progressive-overload number for time-based training: heavier load or longer hold both increase it.
-                  </div>
                 </div>
               );
             })()}
