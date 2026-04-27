@@ -1251,9 +1251,9 @@ const HistoryView = ({ sessions, onBack, onDelete, onOpen, onReload }) => {
 // Timer Widget - Set Timer with 5s countdown, beeps at 30s & 40s
 // Supports compact mode (sticky floating bar)
 // ============================================================
-const TimerWidget = ({ compact = false, onStop, lastLogged = null, onClearLastLogged }) => {
+const TimerWidget = ({ compact = false, onStop, lastLogged = null, onClearLastLogged, onEditLastLogged }) => {
   const [phase, setPhase] = useState('idle'); // idle | countdown | running
-  const [countdown, setCountdown] = useState(5);
+  const [countdown, setCountdown] = useState(7);
   const [elapsed, setElapsed] = useState(0);
   const [finalTime, setFinalTime] = useState(null);
   // Rest timer state
@@ -1354,7 +1354,7 @@ const TimerWidget = ({ compact = false, onStop, lastLogged = null, onClearLastLo
       const totalMs = Date.now() - startMs;
 
       if (phase === 'countdown') {
-        const remaining = Math.max(0, 5 - Math.floor(totalMs / 1000));
+        const remaining = Math.max(0, 7 - Math.floor(totalMs / 1000));
         setCountdown(remaining);
 
         const tickKey = `cd-${remaining}`;
@@ -1363,7 +1363,7 @@ const TimerWidget = ({ compact = false, onStop, lastLogged = null, onClearLastLo
           beep(600, 80, 0.45);
         }
 
-        if (totalMs >= 5000 && !beeped.has('go')) {
+        if (totalMs >= 7000 && !beeped.has('go')) {
           beeped.add('go');
           beep(1200, 400, 0.6);
           setPhase('running');
@@ -1467,7 +1467,7 @@ const TimerWidget = ({ compact = false, onStop, lastLogged = null, onClearLastLo
     beep(800, 80, 0.35);
     requestWakeLock();
     setFinalTime(null);
-    setCountdown(5);
+    setCountdown(7);
     setElapsed(0);
     setPhase('countdown');
     // Starting a new set means rest is over
@@ -1489,7 +1489,7 @@ const TimerWidget = ({ compact = false, onStop, lastLogged = null, onClearLastLo
 
   const clearResult = () => {
     setFinalTime(null);
-    setCountdown(5);
+    setCountdown(7);
     setElapsed(0);
   };
 
@@ -1528,9 +1528,8 @@ const TimerWidget = ({ compact = false, onStop, lastLogged = null, onClearLastLo
       isCountdown ? 'text-orange-300' : 'text-white';
 
     // Rest timer display formatting
-    const restMin = Math.floor(restElapsed / 60);
-    const restSec = restElapsed % 60;
-    const restDisplay = `${restMin}:${String(restSec).padStart(2, '0')}`;
+    // Rest timer display: raw seconds only (no min:sec formatting). Easier to read across the gym.
+    const restDisplay = String(restElapsed);
     // Rest zone colouring matches the beep markers
     const restZone =
       restElapsed >= 120 ? 'late' :   // >= 2 min (triple beep fired)
@@ -1564,12 +1563,17 @@ const TimerWidget = ({ compact = false, onStop, lastLogged = null, onClearLastLo
 
     return (
       <div className="space-y-2">
-        {/* Just-logged set chip - shown alongside rest so the user can see what was just banked */}
+        {/* Just-logged set chip - tap to open the set editor for that cell */}
         {restRunning && lastLogged && (
-          <div className="rounded-xl border border-neutral-800 bg-neutral-950/95 px-3 py-2 flex items-center justify-between gap-3">
+          <button
+            type="button"
+            onClick={onEditLastLogged}
+            className="w-full text-left rounded-xl border border-neutral-800 bg-neutral-950/95 px-3 py-2 flex items-center justify-between gap-3 active:bg-neutral-900 transition-colors"
+            aria-label={`Edit ${lastLogged.isWarmup ? 'warm-up' : 'set'} ${lastLogged.setNumber} for ${lastLogged.exercise}`}
+          >
             <div className="min-w-0 flex-1">
-              <div className="text-[9px] tracking-[0.3em] uppercase font-bold text-neutral-500 leading-none mb-1" style={{ fontFamily: 'var(--font-display)' }}>
-                {lastLogged.isWarmup ? 'WARM-UP' : `SET ${lastLogged.setNumber}`} JUST LOGGED · {lastLogged.exercise}
+              <div className="text-[9px] tracking-[0.3em] uppercase font-bold text-neutral-500 leading-none mb-1 flex items-center gap-1.5" style={{ fontFamily: 'var(--font-display)' }}>
+                <span>{lastLogged.isWarmup ? 'WARM-UP' : `SET ${lastLogged.setNumber}`} JUST LOGGED · {lastLogged.exercise}</span>
               </div>
               <div className="flex items-baseline gap-3 font-mono">
                 <span className="text-2xl font-bold text-white leading-none">{lastLogged.time}<span className="text-xs text-neutral-500 ml-0.5">s</span></span>
@@ -1595,7 +1599,8 @@ const TimerWidget = ({ compact = false, onStop, lastLogged = null, onClearLastLo
                 )}
               </div>
             </div>
-          </div>
+            <Edit3 className="w-4 h-4 text-neutral-500 shrink-0" />
+          </button>
         )}
         {/* Rest timer - large stopwatch face overlay above the set timer */}
         {restRunning && (
@@ -1683,12 +1688,12 @@ const TimerWidget = ({ compact = false, onStop, lastLogged = null, onClearLastLo
               <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
                 <div
                   className={`font-mono font-black leading-none tabular-nums ${restNumColor}`}
-                  style={{ fontSize: ringSize * 0.32, letterSpacing: '-0.04em' }}
+                  style={{ fontSize: ringSize * 0.36, letterSpacing: '-0.04em' }}
                 >
                   {restDisplay}
                 </div>
-                <div className="text-[10px] tracking-[0.3em] text-neutral-500 font-mono mt-1">
-                  {restElapsed}s
+                <div className="text-[10px] tracking-[0.4em] text-neutral-500 font-mono mt-2">
+                  SECONDS
                 </div>
               </div>
             </div>
@@ -3099,6 +3104,8 @@ export default function App() {
           exercises[i] = { ...ex, warmupSets: newWarmups };
           toLog = {
             exercise: ex.name,
+            exerciseIdx: i,
+            setIdx: emptyWarmupIdx,
             isWarmup: true,
             setNumber: emptyWarmupIdx + 1,
             time: adjusted,
@@ -3124,6 +3131,8 @@ export default function App() {
         exercises[i] = { ...ex, sets: newSets };
         toLog = {
           exercise: ex.name,
+          exerciseIdx: i,
+          setIdx: emptyIdx,
           isWarmup: false,
           setNumber: emptyIdx + 1,
           time: adjusted,
@@ -3489,6 +3498,14 @@ export default function App() {
                 onStop={handleTimerStop}
                 lastLogged={lastLogged}
                 onClearLastLogged={() => setLastLogged(null)}
+                onEditLastLogged={() => {
+                  if (!lastLogged) return;
+                  setEditingSet({
+                    exerciseIdx: lastLogged.exerciseIdx,
+                    setIdx: lastLogged.setIdx,
+                    warmup: !!lastLogged.isWarmup,
+                  });
+                }}
               />
             </div>
           </div>
@@ -3527,7 +3544,30 @@ export default function App() {
                 setIndex={editingSet.setIdx}
                 isWarmup={editingSet.warmup}
                 suggested={suggested}
-                onChange={(newEx) => updateExercise(editingSet.exerciseIdx, newEx)}
+                onChange={(newEx) => {
+                  updateExercise(editingSet.exerciseIdx, newEx);
+                  // If we're editing the same cell that's currently shown in the lastLogged chip,
+                  // refresh the chip so it shows the new values.
+                  if (
+                    lastLogged &&
+                    lastLogged.exerciseIdx === editingSet.exerciseIdx &&
+                    lastLogged.setIdx === editingSet.setIdx &&
+                    !!lastLogged.isWarmup === !!editingSet.warmup
+                  ) {
+                    const updatedSet = editingSet.warmup
+                      ? (newEx.warmupSets || [])[editingSet.setIdx]
+                      : (newEx.sets || [])[editingSet.setIdx];
+                    if (updatedSet) {
+                      setLastLogged({
+                        ...lastLogged,
+                        time: updatedSet.time,
+                        weight: updatedSet.weight,
+                        reps: updatedSet.reps,
+                        bw: updatedSet.bw || (newEx.unit === 'bw'),
+                      });
+                    }
+                  }
+                }}
                 onClose={() => setEditingSet(null)}
                 onDeleteSet={handleDeleteSet}
               />
