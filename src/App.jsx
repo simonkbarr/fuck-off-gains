@@ -2127,14 +2127,19 @@ const SessionSummary = ({ justSaved, previousSameProgramme, allSessions, onConti
   const prevTUT = previousSameProgramme ? sessionTUT(previousSameProgramme) : null;
   const tonnage = sessionTonnage(justSaved);
   const prevTonnage = previousSameProgramme ? sessionTonnage(previousSameProgramme) : null;
-  const totalWeight = sessionTotalWeight(justSaved);
-  const prevTotalWeight = previousSameProgramme ? sessionTotalWeight(previousSameProgramme) : null;
   const sets = sessionSetCount(justSaved);
   const prevSets = previousSameProgramme ? sessionSetCount(previousSameProgramme) : null;
   const avgTime = sessionAvgSetTime(justSaved);
   const prevAvg = previousSameProgramme ? sessionAvgSetTime(previousSameProgramme) : null;
   const reps = sessionTotalReps(justSaved);
   const prevReps = previousSameProgramme ? sessionTotalReps(previousSameProgramme) : null;
+  // Number of exercises actually trained (included AND had at least one logged set)
+  const exerciseCountFor = (s) => (s?.exercises || [])
+    .filter((ex) => ex.included !== false)
+    .filter((ex) => (ex.sets || []).some((st) => (Number(st.time) || 0) > 0 || (Number(st.reps) || 0) > 0 || (Number(st.weight) || 0) > 0))
+    .length;
+  const exerciseCount = exerciseCountFor(justSaved);
+  const prevExerciseCount = previousSameProgramme ? exerciseCountFor(previousSameProgramme) : null;
 
   const prs = detectPRs(justSaved, allSessions);
   const highlights = generateHighlights(justSaved, previousSameProgramme);
@@ -2177,10 +2182,10 @@ const SessionSummary = ({ justSaved, previousSameProgramme, allSessions, onConti
         {/* Metric grid */}
         <div className="grid grid-cols-2 gap-2.5 mb-4">
           <MetricCard label="Time Under Tension" value={tut} subunit="s" prev={prevTUT} current={tut} unit="s" />
-          <MetricCard label="Tonnage (kg·s)" value={Math.round(tonnage)} subunit="kg·s" prev={prevTonnage} current={tonnage} unit="" />
+          <MetricCard label="Tonnage" value={Math.round(tonnage)} subunit="kg·s" prev={prevTonnage} current={tonnage} unit="" />
           <MetricCard label="Avg Set Time" value={avgTime.toFixed(1)} subunit="s" prev={prevAvg} current={avgTime} unit="s" />
           <MetricCard label="Sets Completed" value={sets} prev={prevSets} current={sets} unit="" />
-          <MetricCard label="Total Weight Moved" value={Math.round(totalWeight)} subunit="kg" prev={prevTotalWeight} current={totalWeight} unit="kg" />
+          <MetricCard label="Exercises Trained" value={exerciseCount} prev={prevExerciseCount} current={exerciseCount} unit="" />
           {justSaved.whoopRecovery && <MetricCard label="WHOOP Recovery" value={justSaved.whoopRecovery} subunit="%" prev={previousSameProgramme?.whoopRecovery ? Number(previousSameProgramme.whoopRecovery) : null} current={Number(justSaved.whoopRecovery)} unit="%" />}
         </div>
 
@@ -3383,8 +3388,12 @@ export default function App() {
               if (!last) return null;
               const lastTUT = sessionTUT(last);
               const lastTonnage = sessionTonnage(last);
-              const lastTotalWeight = sessionTotalWeight(last);
               const lastSets = sessionSetCount(last);
+              // Count of included exercises that had at least one logged set
+              const lastExerciseCount = (last.exercises || [])
+                .filter((ex) => ex.included !== false)
+                .filter((ex) => (ex.sets || []).some((s) => (Number(s.time) || 0) > 0 || (Number(s.reps) || 0) > 0 || (Number(s.weight) || 0) > 0))
+                .length;
               const lastDate = new Date(last.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }).toUpperCase();
               const programmeLabel = (PROGRAMMES[currentProgramme]?.label || currentProgramme).toUpperCase();
               return (
@@ -3394,6 +3403,10 @@ export default function App() {
                   </div>
                   <div className="grid grid-cols-4 gap-2">
                     <div>
+                      <div className="text-[8px] tracking-widest text-neutral-600 font-mono">EXERCISES</div>
+                      <div className="text-base font-bold font-mono text-white leading-none mt-0.5">{lastExerciseCount}</div>
+                    </div>
+                    <div>
                       <div className="text-[8px] tracking-widest text-neutral-600 font-mono">SETS</div>
                       <div className="text-base font-bold font-mono text-white leading-none mt-0.5">{lastSets}</div>
                     </div>
@@ -3402,11 +3415,7 @@ export default function App() {
                       <div className="text-base font-bold font-mono text-sky-300 leading-none mt-0.5">{Math.floor(lastTUT/60)}:{String(lastTUT%60).padStart(2,'0')}</div>
                     </div>
                     <div>
-                      <div className="text-[8px] tracking-widest text-neutral-600 font-mono">WEIGHT</div>
-                      <div className="text-base font-bold font-mono text-orange-400 leading-none mt-0.5">{Math.round(lastTotalWeight)}<span className="text-[9px] text-neutral-500 ml-0.5">kg</span></div>
-                    </div>
-                    <div>
-                      <div className="text-[8px] tracking-widest text-neutral-600 font-mono">TONNAGE</div>
+                      <div className="text-[8px] tracking-widest text-neutral-600 font-mono" title="Weight × time across all working sets - heavier or longer both push it up">TONNAGE</div>
                       <div className="text-base font-bold font-mono text-amber-300 leading-none mt-0.5">{Math.round(lastTonnage)}<span className="text-[9px] text-neutral-500 ml-0.5">kg·s</span></div>
                     </div>
                   </div>
@@ -3416,6 +3425,9 @@ export default function App() {
                       {last.rating && <span>· Rated {last.rating}/10</span>}
                     </div>
                   )}
+                  <div className="mt-2 text-[9px] text-neutral-600 leading-relaxed">
+                    Tonnage = total weight × time across all working sets. The single best progressive-overload number for time-based training: heavier load or longer hold both increase it.
+                  </div>
                 </div>
               );
             })()}
