@@ -792,17 +792,19 @@ const ExerciseRow = ({
   const warmupSets = exercise.warmupSets || [];
 
   return (
-    <div className={`relative border-b border-neutral-900 py-3 ${!included ? 'opacity-40' : ''} ${isActive && included ? 'bg-orange-500/[0.04]' : ''}`}>
-      {/* Active indicator strip on the left - shown only when this is the active exercise */}
+    <div
+      className={`relative border-b border-neutral-900 py-3 transition-colors ${!included ? 'opacity-40' : ''} ${isActive && included ? 'bg-orange-500/[0.06]' : ''}`}
+    >
+      {/* Active indicator strip on the left edge of the row */}
       {isActive && included && (
-        <div className="absolute left-0 top-0 bottom-0 w-1 bg-orange-500" />
+        <div className="absolute left-0 top-0 bottom-0 w-1 bg-orange-500 pointer-events-none" />
       )}
       {/* Right-edge fade hint to suggest horizontal scroll on wider set rows */}
       {included && exercise.sets && exercise.sets.length > 3 && (
         <div className="pointer-events-none absolute top-12 bottom-8 right-0 w-6" style={{ background: 'linear-gradient(to left, #000 0%, transparent 100%)' }} />
       )}
       {/* Header row - toggle on LEFT, name on right */}
-      <div className="flex items-center mb-1 pl-2 pr-2 gap-6">
+      <div className="flex items-center mb-1 pl-3 pr-2 gap-6">
         {/* Include toggle switch (iOS-style, compact) - positioned left so it is never clipped */}
         <button
           onClick={onToggleIncluded}
@@ -882,7 +884,7 @@ const ExerciseRow = ({
       {prevLine && (
         <button
           onClick={() => setShowPrevDetail(!showPrevDetail)}
-          className="px-1 mb-2 flex items-center gap-1.5 w-full text-left"
+          className="pl-3 pr-1 mb-2 flex items-center gap-1.5 w-full text-left"
         >
           <span className="text-[9px] tracking-widest text-neutral-500 font-semibold" style={{ fontFamily: 'var(--font-display)' }}>LAST</span>
           <span className="text-[10px] text-neutral-500 font-mono truncate flex-1">{prevLine}</span>
@@ -892,7 +894,7 @@ const ExerciseRow = ({
 
       {/* Previous session full per-set grid (expandable) */}
       {showPrevDetail && prev?.setData && (
-        <div className="px-1 mb-3 pb-2 border-b border-neutral-900">
+        <div className="pl-3 pr-1 mb-3 pb-2 border-b border-neutral-900">
           <div className="text-[9px] tracking-widest text-neutral-600 mb-1" style={{ fontFamily: 'var(--font-display)' }}>PREVIOUS SESSION PER-SET</div>
           <div className="overflow-x-auto scrollbar-none" style={{ scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' }}>
             <div className="flex gap-1.5 w-max">
@@ -922,13 +924,13 @@ const ExerciseRow = ({
       {/* Warmup row (if any warmup sets exist, or add button) */}
       {(warmupSets.length > 0 || included) && (
         <div className="mb-2">
-          <div className="flex items-center gap-1.5 px-1 mb-1">
+          <div className="flex items-center gap-1.5 pl-3 pr-1 mb-1">
             <Flame className="w-3 h-3 text-amber-500" />
             <span className="text-[9px] tracking-widest text-amber-500 font-semibold" style={{ fontFamily: 'var(--font-display)' }}>WARM-UP</span>
             <span className="text-[9px] text-neutral-600 font-mono">(not counted in averages)</span>
           </div>
-          <div className="overflow-x-auto scrollbar-none -mx-1 px-1" style={{ scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' }}>
-            <div className="flex gap-2 pb-1 w-max">
+          <div className="overflow-x-auto scrollbar-none" style={{ scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' }}>
+            <div className="flex gap-2 pb-1 w-max pl-3 pr-1">
               {warmupSets.map((set, i) => (
                 <SetCell
                   key={`w-${i}`}
@@ -956,8 +958,8 @@ const ExerciseRow = ({
       )}
 
       {/* Working sets row */}
-      <div className="overflow-x-auto scrollbar-none -mx-1 px-1" style={{ scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' }}>
-        <div className="flex gap-2 pb-1 w-max">
+      <div className="overflow-x-auto scrollbar-none" style={{ scrollbarWidth: 'none', WebkitOverflowScrolling: 'touch' }}>
+        <div className="flex gap-2 pb-1 w-max pl-3 pr-1">
           {exercise.sets.map((set, i) => (
             <SetCell
               key={i}
