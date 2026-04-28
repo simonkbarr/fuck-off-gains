@@ -732,6 +732,8 @@ const ExerciseRow = ({
   onRemoveWarmup,
   onToggleIncluded,
   prev,
+  isActive = false,
+  onSetActive,
 }) => {
   const [editingName, setEditingName] = useState(false);
   const [nameValue, setNameValue] = useState(exercise.name);
@@ -790,7 +792,11 @@ const ExerciseRow = ({
   const warmupSets = exercise.warmupSets || [];
 
   return (
-    <div className={`relative border-b border-neutral-900 py-3 ${!included ? 'opacity-40' : ''}`}>
+    <div className={`relative border-b border-neutral-900 py-3 ${!included ? 'opacity-40' : ''} ${isActive && included ? 'bg-orange-500/[0.04]' : ''}`}>
+      {/* Active indicator strip on the left - shown only when this is the active exercise */}
+      {isActive && included && (
+        <div className="absolute left-0 top-0 bottom-0 w-1 bg-orange-500" />
+      )}
       {/* Right-edge fade hint to suggest horizontal scroll on wider set rows */}
       {included && exercise.sets && exercise.sets.length > 3 && (
         <div className="pointer-events-none absolute top-12 bottom-8 right-0 w-6" style={{ background: 'linear-gradient(to left, #000 0%, transparent 100%)' }} />
@@ -829,13 +835,45 @@ const ExerciseRow = ({
               </button>
             </div>
           ) : (
-            <button onClick={() => { setNameValue(exercise.name); setEditingName(true); }} className="text-left flex items-center gap-2 w-full">
-              {exercise.superset && (
-                <span className="text-[9px] bg-orange-500 text-black px-1.5 py-0.5 rounded font-bold tracking-widest" style={{ fontFamily: 'var(--font-display)' }}>SS</span>
+            <div className="flex items-center gap-1.5 w-full min-w-0">
+              <button onClick={() => { setNameValue(exercise.name); setEditingName(true); }} className="text-left flex items-center gap-2 min-w-0 flex-1">
+                <span className="text-white font-semibold text-[15px] leading-tight truncate">{exercise.name}</span>
+                <Edit3 className="w-3.5 h-3.5 text-neutral-600 shrink-0" />
+              </button>
+              {/* Superset toggle - tap to pair with adjacent superset-marked exercise. */}
+              {included && onChange && (
+                <button
+                  onClick={() => onChange({ ...exercise, superset: !exercise.superset })}
+                  className={`shrink-0 text-[9px] px-1.5 py-0.5 rounded font-bold tracking-widest active:opacity-70 ${
+                    exercise.superset
+                      ? 'bg-orange-500 text-black'
+                      : 'border border-neutral-700 text-neutral-500'
+                  }`}
+                  style={{ fontFamily: 'var(--font-display)' }}
+                  aria-label={exercise.superset ? 'Remove from superset' : 'Mark as superset'}
+                  title="Mark this exercise as a superset partner. Pairs with adjacent exercise also marked SS."
+                >
+                  SS
+                </button>
               )}
-              <span className="text-white font-semibold text-[15px] leading-tight truncate">{exercise.name}</span>
-              <Edit3 className="w-3.5 h-3.5 text-neutral-600 shrink-0" />
-            </button>
+              {/* Active state: show pill if active, or a tap-to-activate button if not */}
+              {included && (
+                isActive ? (
+                  <span className="shrink-0 text-[9px] bg-orange-500 text-black px-1.5 py-0.5 rounded font-bold tracking-widest" style={{ fontFamily: 'var(--font-display)' }}>● ACTIVE</span>
+                ) : (
+                  onSetActive && (
+                    <button
+                      onClick={onSetActive}
+                      className="shrink-0 text-[9px] border border-neutral-700 text-neutral-500 px-1.5 py-0.5 rounded font-bold tracking-widest active:bg-neutral-800"
+                      style={{ fontFamily: 'var(--font-display)' }}
+                      aria-label="Set as active exercise"
+                    >
+                      SET ACTIVE
+                    </button>
+                  )
+                )
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -2688,6 +2726,10 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [savedFlash, setSavedFlash] = useState(false);
   const [showConfetti, setShowConfetti] = useState(false);
+  // Index of the exercise that the timer should fill on its next stop.
+  // Null until session loads, then defaults to the first included exercise.
+  // Tap an exercise to set it, or use the picker arrows above the timer.
+  const [activeExerciseIdx, setActiveExerciseIdx] = useState(null);
   // Tracks the most recently auto-filled set/warmup so the rest timer can display it as "last logged"
   const [lastLogged, setLastLogged] = useState(null); // { exercise, isWarmup, setNumber, time, weight, reps, bw, prevTime, prevWeight }
   const [showSaveConfirm, setShowSaveConfirm] = useState(false);
@@ -2836,6 +2878,18 @@ export default function App() {
       return () => clearTimeout(t);
     }
   }, [session, loading, editingExistingId]);
+
+  // Maintain the active-exercise pointer when the session changes.
+  // Defaults to first included exercise; if the current active becomes invalid (excluded or out of range),
+  // jump to the next valid one.
+  useEffect(() => {
+    if (!session?.exercises) return;
+    const isValid = (idx) => idx !== null && idx >= 0 && idx < session.exercises.length && session.exercises[idx]?.included !== false;
+    if (!isValid(activeExerciseIdx)) {
+      const firstIncluded = session.exercises.findIndex((ex) => ex.included !== false);
+      setActiveExerciseIdx(firstIncluded === -1 ? null : firstIncluded);
+    }
+  }, [session?.id, session?.exercises]);  // re-evaluate on session change or exercise list change
 
   // Build a map of exercise name -> most recent previous SAME-PROGRAMME session stats for that exercise.
   // Only considers "included" exercises, ignores warmup data in averages.
@@ -3076,83 +3130,132 @@ export default function App() {
     setSession(next);
   };
 
-  // --- Timer stop callback: auto-fill next empty slot (warmup OR working set) in natural order ---
-  // Subtracts 3 seconds to compensate for the delay between set completion and tapping stop.
-  // Walks exercises top-to-bottom, and for each one fills warmups first, then working sets.
+  // --- Timer stop callback: fills the next empty slot in the ACTIVE exercise specifically. ---
+  // Subtracts 3 seconds to compensate for delay between set completion and tapping stop.
+  // Within the active exercise, fills warmups first (if any are empty and no working sets started yet), then working sets.
+  // After filling the last working set of the active exercise, auto-advances the active pointer to the next included exercise.
   const handleTimerStop = (elapsedSeconds) => {
     const adjusted = Math.max(1, elapsedSeconds - 3);
-    let toLog = null; // captured in the updater for setLastLogged after
+    let toLog = null;
+    let advanceTo = null; // set if we should move active pointer after this fill
     setSession((s) => {
       if (!s) return s;
+      // Use the current active pointer; if invalid, fall back to first included.
+      let targetIdx = activeExerciseIdx;
+      if (targetIdx === null || targetIdx < 0 || targetIdx >= s.exercises.length || s.exercises[targetIdx]?.included === false) {
+        targetIdx = s.exercises.findIndex((ex) => ex.included !== false);
+        if (targetIdx === -1) return s; // no included exercises at all
+      }
       const exercises = [...s.exercises];
-      for (let i = 0; i < exercises.length; i++) {
-        const ex = exercises[i];
-        if (ex.included === false) continue;
-        const isBW = ex.unit === 'bw';
-        const prev = previousByExercise[ex.name];
+      const ex = exercises[targetIdx];
+      const isBW = ex.unit === 'bw';
+      const prev = previousByExercise[ex.name];
 
-        // First: try to fill an empty warmup slot for this exercise
-        const warmups = ex.warmupSets || [];
-        const emptyWarmupIdx = warmups.findIndex((st) => st.time === '' || st.time === undefined || st.time === null);
-        const anyWorkingStarted = (ex.sets || []).some((st) => (st.time !== '' && st.time !== undefined && st.time !== null) || (st.reps !== '' && st.reps !== undefined && st.reps !== null) || st.failure);
-        if (emptyWarmupIdx !== -1 && !anyWorkingStarted) {
-          const prevW = prev?.warmupSetData?.[emptyWarmupIdx];
-          const newW = { ...warmups[emptyWarmupIdx], time: adjusted };
-          if (!isBW && !newW.bw && prevW && prevW.weight !== '' && prevW.weight !== 0 && (newW.weight === '' || newW.weight === 0)) {
-            newW.weight = prevW.weight;
-          }
-          if (!newW.reps && prevW && prevW.reps !== '' && prevW.reps !== 0) {
-            newW.reps = prevW.reps;
-          }
-          const newWarmups = [...warmups];
-          newWarmups[emptyWarmupIdx] = newW;
-          exercises[i] = { ...ex, warmupSets: newWarmups };
-          toLog = {
-            exercise: ex.name,
-            exerciseIdx: i,
-            setIdx: emptyWarmupIdx,
-            isWarmup: true,
-            setNumber: emptyWarmupIdx + 1,
-            time: adjusted,
-            weight: newW.weight,
-            reps: newW.reps,
-            bw: newW.bw || isBW,
-            prevTime: prevW?.time,
-            prevWeight: prevW?.weight,
-          };
+      // Timer always fills working sets only. To log a warm-up time, tap the warm-up cell directly
+      // (this opens the Set Editor where you can enter the time/weight/reps manually).
+      // This avoids the auto-fill landing in a warm-up cell when you skip warm-ups.
+      const emptyIdx = ex.sets.findIndex((st) => st.time === '' && st.reps === '' && !st.failure);
+      if (emptyIdx === -1) {
+        // All working sets in active exercise are already filled - try to auto-advance to the next included exercise
+        // and fill its first empty WORKING set. Warmups are never auto-filled.
+        for (let nextI = targetIdx + 1; nextI < exercises.length; nextI++) {
+          const nx = exercises[nextI];
+          if (nx.included === false) continue;
+          const nxIsBW = nx.unit === 'bw';
+          const nxPrev = previousByExercise[nx.name];
+          const nxEmptyIdx = nx.sets.findIndex((st) => st.time === '' && st.reps === '' && !st.failure);
+          if (nxEmptyIdx === -1) continue;
+          const nxPrevSet = nxPrev?.setData?.[nxEmptyIdx];
+          const newSet = { ...nx.sets[nxEmptyIdx], time: adjusted };
+          if (!nxIsBW && !newSet.bw && nxPrevSet && nxPrevSet.weight !== '' && nxPrevSet.weight !== 0 && (newSet.weight === '' || newSet.weight === 0)) newSet.weight = nxPrevSet.weight;
+          const newNxSets = [...nx.sets];
+          newNxSets[nxEmptyIdx] = newSet;
+          exercises[nextI] = { ...nx, sets: newNxSets };
+          toLog = { exercise: nx.name, exerciseIdx: nextI, setIdx: nxEmptyIdx, isWarmup: false, setNumber: nxEmptyIdx + 1, time: adjusted, weight: newSet.weight, reps: newSet.reps, bw: newSet.bw || nxIsBW, prevTime: nxPrevSet?.time, prevWeight: nxPrevSet?.weight };
+          advanceTo = nextI;
           return { ...s, exercises };
         }
-
-        // Otherwise fill the next empty working set
-        const emptyIdx = ex.sets.findIndex((st) => st.time === '' && st.reps === '' && !st.failure);
-        if (emptyIdx === -1) continue;
-        const prevSet = prev?.setData?.[emptyIdx];
-        const newSet = { ...ex.sets[emptyIdx], time: adjusted };
-        if (!isBW && !newSet.bw && prevSet && prevSet.weight !== '' && prevSet.weight !== 0 && (newSet.weight === '' || newSet.weight === 0)) {
-          newSet.weight = prevSet.weight;
-        }
-        const newSets = [...ex.sets];
-        newSets[emptyIdx] = newSet;
-        exercises[i] = { ...ex, sets: newSets };
-        toLog = {
-          exercise: ex.name,
-          exerciseIdx: i,
-          setIdx: emptyIdx,
-          isWarmup: false,
-          setNumber: emptyIdx + 1,
-          time: adjusted,
-          weight: newSet.weight,
-          reps: newSet.reps,
-          bw: newSet.bw || isBW,
-          prevTime: prevSet?.time,
-          prevWeight: prevSet?.weight,
-        };
-        return { ...s, exercises };
+        return s; // nothing more to fill anywhere
       }
-      return s;
+      const prevSet = prev?.setData?.[emptyIdx];
+      const newSet = { ...ex.sets[emptyIdx], time: adjusted };
+      if (!isBW && !newSet.bw && prevSet && prevSet.weight !== '' && prevSet.weight !== 0 && (newSet.weight === '' || newSet.weight === 0)) {
+        newSet.weight = prevSet.weight;
+      }
+      const newSets = [...ex.sets];
+      newSets[emptyIdx] = newSet;
+      exercises[targetIdx] = { ...ex, sets: newSets };
+      toLog = {
+        exercise: ex.name,
+        exerciseIdx: targetIdx,
+        setIdx: emptyIdx,
+        isWarmup: false,
+        setNumber: emptyIdx + 1,
+        time: adjusted,
+        weight: newSet.weight,
+        reps: newSet.reps,
+        bw: newSet.bw || isBW,
+        prevTime: prevSet?.time,
+        prevWeight: prevSet?.weight,
+      };
+      // Determine where to move the active pointer next.
+      // Superset rule: any two ADJACENT included exercises both flagged superset:true are paired.
+      // After filling a set on either of them, the pointer flips to its partner
+      // (unless both are completely full, in which case we move past the pair).
+      // Otherwise: advance forward only when the active exercise is fully filled.
+      const findIncludedNeighbour = (idx, dir) => {
+        for (let j = idx + dir; j >= 0 && j < exercises.length; j += dir) {
+          if (exercises[j].included !== false) return j;
+        }
+        return -1;
+      };
+      const isFullyFilled = (e) => {
+        if (!e || e.included === false) return false;
+        const remaining = (e.sets || []).filter((st) => st.time === '' && st.reps === '' && !st.failure).length;
+        return remaining === 0;
+      };
+      const justFilledExercise = exercises[targetIdx];
+      const remainingEmpty = newSets.filter((st) => st.time === '' && st.reps === '' && !st.failure).length;
+
+      // Look at adjacent included exercises to find a superset partner (one of them must be the active exercise)
+      let supersetPartnerIdx = -1;
+      const prevIncluded = findIncludedNeighbour(targetIdx, -1);
+      const nextIncluded = findIncludedNeighbour(targetIdx, +1);
+      // The pair is valid only if BOTH the active and the neighbour have superset:true
+      // and they are immediate neighbours (we already filtered for that via findIncludedNeighbour returning the closest).
+      if (justFilledExercise.superset === true) {
+        if (nextIncluded !== -1 && exercises[nextIncluded].superset === true) {
+          supersetPartnerIdx = nextIncluded;
+        } else if (prevIncluded !== -1 && exercises[prevIncluded].superset === true) {
+          supersetPartnerIdx = prevIncluded;
+        }
+      }
+
+      if (supersetPartnerIdx !== -1) {
+        const partner = exercises[supersetPartnerIdx];
+        const partnerFull = isFullyFilled(partner);
+        const activeFull = remainingEmpty === 0;
+        if (!partnerFull) {
+          // Flip to partner so the user can do their next superset round
+          advanceTo = supersetPartnerIdx;
+        } else if (!activeFull) {
+          // Partner finished but we still have sets - stay on active exercise (no advance)
+          advanceTo = null;
+        } else {
+          // Both fully filled - move past the entire pair to the next included exercise
+          const lastOfPair = Math.max(targetIdx, supersetPartnerIdx);
+          advanceTo = findIncludedNeighbour(lastOfPair, +1);
+          if (advanceTo === -1) advanceTo = null;
+        }
+      } else if (remainingEmpty === 0) {
+        // Not in a superset and fully filled: advance forward to the next included exercise
+        const next = findIncludedNeighbour(targetIdx, +1);
+        advanceTo = next === -1 ? null : next;
+      }
+      return { ...s, exercises };
     });
-    // Defer the state update to avoid double-render warnings inside the setSession updater
     if (toLog) setTimeout(() => setLastLogged(toLog), 0);
+    if (advanceTo !== null) setTimeout(() => setActiveExerciseIdx(advanceTo), 0);
   };
 
   if (loading || !session) {
@@ -3444,6 +3547,8 @@ export default function App() {
                     exercise={ex}
                     index={i}
                     prev={previousByExercise[ex.name]}
+                    isActive={!editingExistingId && i === activeExerciseIdx}
+                    onSetActive={editingExistingId ? null : () => setActiveExerciseIdx(i)}
                     onChange={(newEx) => updateExercise(i, newEx)}
                     onEditSet={(setIdx) => setEditingSet({ exerciseIdx: i, setIdx, warmup: false })}
                     onEditWarmup={(setIdx) => setEditingSet({ exerciseIdx: i, setIdx, warmup: true })}
@@ -3493,9 +3598,90 @@ export default function App() {
             </div>
           </div>
 
-          {/* Sticky bottom bar: Timer + Save */}
+          {/* Sticky bottom bar: Active picker + Timer */}
           <div className="fixed bottom-0 left-0 right-0 bg-black/90 backdrop-blur-md border-t-2 border-neutral-900 z-20">
             <div className="p-3 space-y-2">
+              {/* Active exercise picker - lets you pick which exercise the next timer-stop will fill. */}
+              {!editingExistingId && session?.exercises && (() => {
+                const includedIdxs = session.exercises
+                  .map((ex, i) => ({ ex, i }))
+                  .filter((p) => p.ex.included !== false)
+                  .map((p) => p.i);
+                if (includedIdxs.length === 0) return null;
+                const currentPos = includedIdxs.indexOf(activeExerciseIdx);
+                const activeEx = activeExerciseIdx !== null ? session.exercises[activeExerciseIdx] : null;
+                const goPrev = () => {
+                  if (currentPos === -1) {
+                    setActiveExerciseIdx(includedIdxs[0]);
+                  } else {
+                    const newPos = (currentPos - 1 + includedIdxs.length) % includedIdxs.length;
+                    setActiveExerciseIdx(includedIdxs[newPos]);
+                  }
+                };
+                const goNext = () => {
+                  if (currentPos === -1) {
+                    setActiveExerciseIdx(includedIdxs[0]);
+                  } else {
+                    const newPos = (currentPos + 1) % includedIdxs.length;
+                    setActiveExerciseIdx(includedIdxs[newPos]);
+                  }
+                };
+                // Show set progress for the active exercise so you can see where you are
+                let progress = '';
+                if (activeEx) {
+                  const filled = (activeEx.sets || []).filter((st) => (Number(st.time) || 0) > 0 || (Number(st.reps) || 0) > 0 || st.failure).length;
+                  const total = (activeEx.sets || []).length;
+                  progress = total > 0 ? `SET ${Math.min(filled + 1, total)}/${total}` : '';
+                }
+                // Detect superset partner so we can show a hint that the pointer will flip after each set
+                let supersetPartnerName = null;
+                if (activeEx && activeEx.superset === true && activeExerciseIdx !== null) {
+                  const findIncl = (idx, dir) => {
+                    for (let j = idx + dir; j >= 0 && j < session.exercises.length; j += dir) {
+                      if (session.exercises[j].included !== false) return j;
+                    }
+                    return -1;
+                  };
+                  const next = findIncl(activeExerciseIdx, +1);
+                  const prev = findIncl(activeExerciseIdx, -1);
+                  if (next !== -1 && session.exercises[next].superset === true) supersetPartnerName = session.exercises[next].name;
+                  else if (prev !== -1 && session.exercises[prev].superset === true) supersetPartnerName = session.exercises[prev].name;
+                }
+                return (
+                  <div className="rounded-xl border border-orange-500/40 bg-neutral-950 flex items-center gap-1 px-1 py-1">
+                    <button
+                      onClick={goPrev}
+                      className="h-9 w-9 rounded-lg active:bg-neutral-800 flex items-center justify-center shrink-0"
+                      aria-label="Previous exercise"
+                    >
+                      <ChevronLeft className="w-5 h-5 text-neutral-400" />
+                    </button>
+                    <div className="flex-1 min-w-0 text-center">
+                      <div className="text-[8px] tracking-[0.3em] text-orange-500 font-bold leading-none mb-0.5" style={{ fontFamily: 'var(--font-display)' }}>
+                        ● ACTIVE · TIMER FILLS THIS
+                      </div>
+                      <div className="text-sm font-bold text-white truncate leading-tight">
+                        {activeEx ? activeEx.name : '(none)'}
+                      </div>
+                      {progress && (
+                        <div className="text-[9px] tracking-widest text-neutral-500 font-mono leading-none mt-0.5">{progress}</div>
+                      )}
+                      {supersetPartnerName && (
+                        <div className="text-[9px] tracking-widest text-orange-400 font-mono leading-none mt-0.5 truncate">
+                          ↔ SS: {supersetPartnerName}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={goNext}
+                      className="h-9 w-9 rounded-lg active:bg-neutral-800 flex items-center justify-center shrink-0"
+                      aria-label="Next exercise"
+                    >
+                      <ChevronLeft className="w-5 h-5 text-neutral-400 rotate-180" />
+                    </button>
+                  </div>
+                );
+              })()}
               <TimerWidget
                 key={session?.id || 'no-session'}
                 compact
